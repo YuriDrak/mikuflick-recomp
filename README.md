@@ -83,6 +83,7 @@ See [`port/README.md`](port/README.md) for the full control and UI description.
 | `port/` | The Linux port: C sources, `Makefile`, bundled M+ font, detailed README. |
 | `docs/` | Reverse-engineering notes, the port design plan and the original IPA archive inventory. |
 | `tools/` | Self-contained C utilities and scripts used during analysis (`machoinfo`, `usmdump`, `bplist2json`, `mfextract`, Ghidra helpers, IPA extractor). |
+| `CLAUDE.md` | Agent operational rules and the current project status. |
 | `extracted/` | *Ignored.* Your extracted game bundle, created by `make setup`. |
 | `work/` | *Ignored.* Reverse-engineering scratch space: chart dumps, decompiled functions and Ghidra projects. |
 | `build/`, `port/build/` | *Ignored.* Compiled objects and helper binaries. |

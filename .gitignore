@@ -31,9 +31,8 @@ work/
 tools/third_party/
 
 # ---------------------------------------------------------------------------
-# Local agent configuration and editor / OS noise
+# Editor / OS noise
 # ---------------------------------------------------------------------------
-CLAUDE.md
 .opencode/
 .cache/
 .DS_Store
