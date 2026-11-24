@@ -102,7 +102,11 @@ bool mixer_init(void) {
     want.freq = AUDIO_RATE;
     want.format = AUDIO_S16SYS;
     want.channels = 2;
+#ifdef __ANDROID__
+    want.samples = 512;    /* lower output latency; the clock below adapts to what the device grants */
+#else
     want.samples = 1024;
+#endif
     want.callback = callback;
     M.dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (!M.dev) { log_msg("audio: %s", SDL_GetError()); return false; }

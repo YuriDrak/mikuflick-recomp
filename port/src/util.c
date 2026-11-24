@@ -3,6 +3,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 void *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
@@ -23,9 +26,13 @@ void *read_file(const char *path, size_t *len) {
 void log_msg(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
+#ifdef __ANDROID__
+    __android_log_vprint(ANDROID_LOG_INFO, "mikuflick", fmt, ap);   /* adb logcat -s mikuflick */
+#else
     fputs("[mikuflick] ", stderr);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
+#endif
     va_end(ap);
 }
 

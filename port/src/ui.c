@@ -149,6 +149,12 @@ struct UiState {
     int preview_voice;
     Uint32 song_changed_ms;
     int bgm_voice;
+    /* options */
+    int opt_mode, opt_row, help_page;
+    unsigned credits_t;
+    /* PV viewer */
+    int pv_focus;
+    bool pv_lyrics, pv_karaoke, pv_loop, pv_shuffle;
     /* result */
     GameResult res;
     bool new_record;
@@ -168,6 +174,8 @@ UiState *ui_create(SDL_Renderer *ren, Assets *as, const GameData *gd, SaveData *
     u->preview_voice = -1;
     u->bgm_voice = -1;
     u->diff = 1;
+    u->pv_lyrics = true;     /* PV viewer defaults: lyrics on */
+    u->pv_focus = 3;
     u->menu_focus = 0;
     u->menu_press = -1;
     u->logo_song = u->prev_logo = -1;
@@ -352,6 +360,8 @@ static void title_tick(UiState *u) {
     }
 }
 
+static void opt_open(UiState *u, int mode);
+
 void ui_enter(UiState *u, int scene, const GameResult *res) {
     u->scene = scene;
     u->enter_ms = u->last_ms = SDL_GetTicks();
@@ -365,7 +375,8 @@ void ui_enter(UiState *u, int scene, const GameResult *res) {
         if (u->tstate < 9) { u->tstate = 9; u->tcount = 60; u->fade = 0; }   /* --start-scene title */
         else title_start_menu(u);        /* back from music select: menu already open */
     }
-    if (scene == SCENE_SELECT) {
+    if (scene == SCENE_OPTION) opt_open(u, 0 /* OPT_MAIN */);
+    if (scene == SCENE_SELECT || scene == SCENE_PV) {
         stop_bgm(u);
         u->song_changed_ms = SDL_GetTicks();
         covers_snap(u);
@@ -415,7 +426,49 @@ static int start_game(UiState *u, int *song, int *diff) {
     play_sound(u->as, SND_HIT);
     *song = u->song;
     *diff = u->diff;
+    /* PV viewer playback goes through the game engine in "PV mode" */
+    u->opt->pv_mode = u->scene == SCENE_PV;
+    u->opt->pv_lyrics = u->pv_lyrics;
+    u->opt->pv_karaoke = u->pv_karaoke;
+    u->opt->pv_loop = u->pv_loop;
+    u->opt->pv_shuffle = u->pv_shuffle;
     return SCENE_GAME;
+}
+
+/* PV select (ScenePVSelect, help_02 panel 4): PLAYLIST / LOOP / SHUFFLE / LYRICS / KARAOKE toggles */
+static const char *k_pv_icon[5] = {"playlist", "loop", "shuffle", "lyrics", "karaoke"};
+static bool *pv_flag(UiState *u, int i) {
+    return i == 1 ? &u->pv_loop : i == 2 ? &u->pv_shuffle : i == 3 ? &u->pv_lyrics : i == 4 ? &u->pv_karaoke : NULL;
+}
+
+static int pv_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
+    bool click = e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT;
+    bool key = e->type == SDL_KEYDOWN && !e->key.repeat;
+    SDL_Keycode k = key ? e->key.keysym.sym : 0;
+    float mx = click ? (float)e->button.x : 0, my = click ? (float)e->button.y : 0;
+    int toggle = -1;
+    if (key) {
+        if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) { stop_preview(u); play_sound(u->as, SND_CANCEL); return SCENE_TITLE; }
+        if (k == SDLK_LEFT) select_move(u, -1, 0);
+        if (k == SDLK_RIGHT) select_move(u, 1, 0);
+        if (k == SDLK_UP) u->pv_focus = u->pv_focus <= 1 ? 4 : u->pv_focus - 1;
+        if (k == SDLK_DOWN) u->pv_focus = u->pv_focus >= 4 ? 1 : u->pv_focus + 1;
+        if (k == SDLK_SPACE) toggle = u->pv_focus;
+        if (k == SDLK_RETURN || k == SDLK_KP_ENTER) return start_game(u, song, diff);
+    }
+    if (click) {
+        if (my > 250 && my < 590 && mx < 160) select_move(u, -1, 0);
+        else if (my > 250 && my < 590 && mx > 480) select_move(u, 1, 0);
+        else if (my >= 754 && my < 847) { int i = (int)((mx - 18) / 128); if (i >= 0 && i < 5) toggle = i; }
+        else if (my > 870 && mx > 165 && mx < 475) return start_game(u, song, diff);
+        else if (my > 880 && mx < 160) { stop_preview(u); play_sound(u->as, SND_CANCEL); return SCENE_TITLE; }
+    }
+    if (toggle >= 0) {
+        bool *f = pv_flag(u, toggle);
+        if (f) { *f = !*f; u->pv_focus = toggle; play_sound(u->as, SND_DECIDE); }
+        else play_sound(u->as, SND_CANCEL);   /* PLAYLIST editing is not ported */
+    }
+    return -1;
 }
 
 /* title menu button hit test (menubutton_l_base 394x82 at (x, 538+82*i)) */
@@ -429,10 +482,236 @@ static int menu_hit(UiState *u, float mx, float my) {
 
 static int menu_activate(UiState *u, int i) {
     if (i == 0) { play_sound(u->as, SND_HIT); return SCENE_SELECT; }   /* RHYTHM GAME */
-    play_sound(u->as, SND_CANCEL);                                     /* PV / OPTIONS / SHOP: not ported */
+    if (i == 1) { play_sound(u->as, SND_HIT); return SCENE_PV; }       /* PV */
+    if (i == 2) { play_sound(u->as, SND_HIT); return SCENE_OPTION; }   /* OPTIONS */
+    play_sound(u->as, SND_CANCEL);                                     /* SHOP: servers are gone */
     u->menu_flash = 20;
     u->menu_focus = i;
     return -1;
+}
+
+/* ------------------------------------------------------------ options (SceneOption / WindowOption) */
+
+enum { OPT_MAIN, OPT_AUDIO, OPT_HAND, OPT_KEYBOARD, OPT_HELP, OPT_CREDITS, OPT_DISPLAY };
+static const char *k_opt_title[7] = {"OPTIONS", "AUDIO", "HANDEDNESS", "KEYBOARD", "HELP", "CREDITS", "DISPLAY"};
+/* Localizable.strings OPTION_TITLE_0N (English) */
+static const char *k_opt_sub[7] = {"Please select a category to change.", "MUSIC and SFX", "Handedness Settings",
+                                   "Keyboard Settings", "", "", "Configure Display Settings"};
+/* main list order as on the iOS screen (help_02 panel 2) -> mode */
+static const int k_opt_list[6] = {OPT_DISPLAY, OPT_AUDIO, OPT_HAND, OPT_KEYBOARD, OPT_HELP, OPT_CREDITS};
+
+static void opt_store(UiState *u) {
+    u->save->opt = *u->opt;
+    u->save->has_opt = true;
+    save_write(u->save);
+    mixer_set_master(1.0f, u->opt->se_volume);
+}
+
+static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+/* change the focused row of a sub page by d (-1/+1); toggles for on/off rows */
+static void opt_adjust(UiState *u, int d) {
+    Options *o = u->opt;
+    switch (u->opt_mode) {
+    case OPT_AUDIO:
+        if (u->opt_row == 0) o->bgm_volume = clamp01(roundf(o->bgm_volume * 10 + d) / 10);
+        else if (u->opt_row == 1) { o->se_volume = clamp01(roundf(o->se_volume * 10 + d) / 10); }
+        else o->fail_sound = !o->fail_sound;
+        break;
+    case OPT_HAND: o->left_hand = d < 0; break;
+    case OPT_KEYBOARD: o->keyboard = (o->keyboard + d + 3) % 3; break;
+    case OPT_DISPLAY:
+        if (u->opt_row == 0) o->guide_panel = d < 0;
+        else if (u->opt_row == 1) o->flower = d < 0;
+        else { o->input_timing += d; if (o->input_timing < -10) o->input_timing = -10; if (o->input_timing > 10) o->input_timing = 10; }
+        break;
+    case OPT_HELP: u->help_page = (u->help_page + d + 2) % 2; play_sound(u->as, SND_DECIDE); return;
+    default: return;
+    }
+    opt_store(u);
+    play_sound(u->as, SND_DECIDE);
+}
+
+static int opt_rows(int mode) { return mode == OPT_AUDIO || mode == OPT_DISPLAY ? 3 : 1; }
+
+static void opt_open(UiState *u, int mode) {
+    u->opt_mode = mode;
+    u->opt_row = 0;
+    u->help_page = 0;
+    u->credits_t = 0;
+}
+
+static int option_event(UiState *u, const SDL_Event *e) {
+    bool click = e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT;
+    bool key = e->type == SDL_KEYDOWN && !e->key.repeat;
+    SDL_Keycode k = key ? e->key.keysym.sym : 0;
+    float mx = click ? (float)e->button.x : 0, my = click ? (float)e->button.y : 0;
+    bool ok = key && (k == SDLK_RETURN || k == SDLK_SPACE || k == SDLK_KP_ENTER);
+    bool back = (key && (k == SDLK_ESCAPE || k == SDLK_BACKSPACE)) || (click && my > 880 && mx < 140);
+    if (back) {
+        play_sound(u->as, SND_CANCEL);
+        if (u->opt_mode == OPT_MAIN) return SCENE_TITLE;
+        int from = u->opt_mode;
+        opt_open(u, OPT_MAIN);
+        for (int i = 0; i < 6; i++) if (k_opt_list[i] == from) u->opt_row = i;
+        return -1;
+    }
+    if (u->opt_mode == OPT_MAIN) {
+        if (key && k == SDLK_UP) u->opt_row = (u->opt_row + 5) % 6;
+        if (key && k == SDLK_DOWN) u->opt_row = (u->opt_row + 1) % 6;
+        if (click)
+            for (int i = 0; i < 6; i++)
+                if (mx >= 123 && mx < 517 && my >= 379 + 82 * i && my < 461 + 82 * i) { u->opt_row = i; ok = true; }
+        if (ok) { play_sound(u->as, SND_HIT); opt_open(u, k_opt_list[u->opt_row]); }
+        return -1;
+    }
+    int rows = opt_rows(u->opt_mode);
+    if (key && k == SDLK_UP) u->opt_row = (u->opt_row + rows - 1) % rows;
+    if (key && k == SDLK_DOWN) u->opt_row = (u->opt_row + 1) % rows;
+    if (key && k == SDLK_LEFT) opt_adjust(u, -1);
+    if (key && k == SDLK_RIGHT) opt_adjust(u, 1);
+    if (ok && (u->opt_mode == OPT_AUDIO && u->opt_row == 2)) opt_adjust(u, 1);
+    if (click) {
+        switch (u->opt_mode) {
+        case OPT_AUDIO:
+            for (int r = 0; r < 2; r++)
+                if (my >= 580 + 60 * r && my < 630 + 60 * r && mx >= 240 && mx < 560) {
+                    u->opt_row = r;
+                    float v = clamp01(roundf((mx - 240) / 30.0f + 0.5f) / 10.0f);
+                    if (r == 0) u->opt->bgm_volume = v; else u->opt->se_volume = v;
+                    opt_store(u);
+                    play_sound(u->as, SND_DECIDE);
+                }
+            if (my >= 735 && my < 790 && mx >= 220 && mx < 420) { u->opt_row = 2; opt_adjust(u, 1); }
+            break;
+        case OPT_HAND:
+            if (my > 320 && my < 720) { u->opt->left_hand = mx < 320; opt_store(u); play_sound(u->as, SND_DECIDE); }
+            break;
+        case OPT_KEYBOARD:
+            if (my > 330 && my < 660) { u->opt->keyboard = mx < 213 ? 0 : mx < 427 ? 1 : 2; opt_store(u); play_sound(u->as, SND_DECIDE); }
+            break;
+        case OPT_DISPLAY:
+            if (my > 355 && my < 470) { u->opt_row = 0; u->opt->guide_panel = mx < 320; opt_store(u); play_sound(u->as, SND_DECIDE); }
+            else if (my > 535 && my < 690) { u->opt_row = 1; u->opt->flower = mx < 320; opt_store(u); play_sound(u->as, SND_DECIDE); }
+            else if (my > 720 && my < 800) {
+                u->opt_row = 2;
+                int v = (int)roundf((mx - 319.5f) / 20.0f);
+                u->opt->input_timing = v < -10 ? -10 : v > 10 ? 10 : v;
+                opt_store(u);
+                play_sound(u->as, SND_DECIDE);
+            }
+            break;
+        case OPT_HELP: opt_adjust(u, mx < 320 ? -1 : 1); break;
+        default: break;
+        }
+    }
+    return -1;
+}
+
+/* WindowOption Render @0x44504: bg_tex_04, title y=182, subtitle y=234, page contents, back button */
+static void render_option(UiState *u) {
+    SDL_Renderer *r = u->ren;
+    const Options *o = u->opt;
+    const Atlas *u1 = &u->as->ui1, *u3 = &u->as->ui3, *u4 = &u->as->ui4;
+    spr_tl(r, &u->as->bg_options, "bg_options", 0, 0, 255);
+    if (u->opt_mode != OPT_HELP && u->opt_mode != OPT_CREDITS) {
+        font_draw(r, k_opt_title[u->opt_mode], 320, 168, 4.4f, WHITE, 0);
+        font_draw(r, k_opt_sub[u->opt_mode], 320, 228, 2.4f, WHITE, 0);
+    }
+    switch (u->opt_mode) {
+    case OPT_MAIN:
+        for (int i = 0; i < 6; i++) {
+            float x = 123, y = 379 + 82.0f * i;
+            spr_tl(r, u1, "menubutton_l_base", x, y, 255);
+            spr_tl(r, u1, "menubutton_l_off", x + 7, y + 7, 255);
+            font_draw(r, k_opt_title[k_opt_list[i]], x + 197, y + 25, 3.2f, WHITE, 0);
+            if (i == u->opt_row) {
+                spr_tl(r, u1, "parenthesis_00", x + 8, y + 7, 255);
+                spr_tl(r, u1, "parenthesis_01", x + 394 - 8 - 39, y + 7, 255);
+            }
+        }
+        break;
+    case OPT_AUDIO: {
+        spr_tl(r, u3, "volumewindow", 81, 303, 255);
+        spr_tl(r, u3, "speaker", 203, 318, 255);
+        static const char *rowname[2] = {"MUSIC", "SFX"};
+        for (int row = 0; row < 2; row++) {
+            float y = 592 + 60.0f * row, v = row == 0 ? o->bgm_volume : o->se_volume;
+            SDL_Color c = u->opt_row == row ? (SDL_Color){255, 240, 120, 255} : (SDL_Color){40, 60, 80, 255};
+            font_draw(r, rowname[row], 230, y + 4, 2.4f, c, 1);
+            for (int i = 0; i < 10; i++)
+                spr_tl(r, u3, i < (int)roundf(v * 10) ? "volumemeter_on" : "volumemeter_off", 250 + 30.0f * i, y, 255);
+        }
+        spr_tl(r, u1, o->fail_sound ? "failedsound_on_b" : "failedsound_off_b", 220, 740, 255);
+        if (u->opt_row == 2) {
+            SDL_SetRenderDrawColor(r, 255, 240, 120, 255);
+            SDL_FRect fr = {216, 736, 207, 53};
+            SDL_RenderDrawRectF(r, &fr);
+        }
+        break;
+    }
+    case OPT_HAND:
+        if (o->left_hand) { spr_tl(r, u3, "lefthand_on", 25, 320, 255); spr_tl(r, u3, "righthand_off", 345, 363, 255); }
+        else { spr_tl(r, u3, "lefthand_off", 36, 363, 255); spr_tl(r, u3, "righthand_on", 330, 320, 255); }
+        break;
+    case OPT_KEYBOARD: {
+        static const char *kb[3] = {"keyboard_ori", "keyboard_fro", "keyboard_rah"};
+        for (int i = 0; i < 3; i++) {
+            char name[32];
+            float cx = 110 + 210.0f * i;
+            bool on = o->keyboard == i;
+            snprintf(name, sizeof name, "%s_%s", kb[i], on ? "on" : "off");
+            spr_tl(r, u4, name, on ? cx - 123 : cx - 98, on ? 335 : 365, 255);
+        }
+        break;
+    }
+    case OPT_DISPLAY: {
+        spr_tl(r, u4, "panelguideline", 35, 319, 255);
+        spr_tl(r, u4, o->guide_panel ? "panelguide_on_on" : "panelguide_on_off", 150, 360, 255);
+        spr_tl(r, u4, o->guide_panel ? "panelguide_off_off" : "panelguide_off_on", 360, 360, 255);
+        spr_tl(r, u4, "flowerline", 38, 495, 255);
+        spr_tl(r, u4, o->flower ? "flowet_on_on" : "flowet_on_off", 130, 540, 255);
+        spr_tl(r, u4, o->flower ? "flowet_off_off" : "flowet_off_on", 340, 540, 255);
+        /* TouchInputTiming: inputbar at x=100, cursor slides along it (port: -10..+10 steps) */
+        char buf[48];
+        snprintf(buf, sizeof buf, "INPUT TIMING %+d", o->input_timing);
+        font_draw(r, buf, 320, 704, 2.4f, u->opt_row == 2 ? (SDL_Color){255, 240, 120, 255} : WHITE, 0);
+        spr_tl(r, &u->as->game1, "inputbar", 100, 750, 255);
+        spr_tl(r, &u->as->game1, "inputcursor", 319.5f + 20.0f * o->input_timing - 34.5f, 731, 255);
+        for (int row = 0; row < 2; row++)
+            if (u->opt_row == row) {
+                SDL_SetRenderDrawColor(r, 255, 240, 120, 255);
+                SDL_FRect fr = {30, row == 0 ? 315.0f : 491.0f, 589, 40};
+                SDL_RenderDrawRectF(r, &fr);
+            }
+        break;
+    }
+    case OPT_HELP: {
+        /* help_01/02: the 3x2 annotated screenshot sheets shipped for the in-game help */
+        const Atlas *h = &u->as->help[u->help_page];
+        if (h->tex) {
+            SDL_Rect src = {0, 0, h->w < 960 ? h->w : 960, h->h < 960 ? h->h : 960};
+            spr_tl_rect(r, h, &src, 0, 150, 640, 640, 255);
+        }
+        char buf[32];
+        snprintf(buf, sizeof buf, "HELP  %d / 2", u->help_page + 1);
+        font_draw(r, buf, 320, 92, 3.2f, WHITE, 0);
+        spr_tl(r, u3, "arrow_00", 20, 820, 255);
+        spr_tl(r, u3, "arrow_01", 552, 820, 255);
+        break;
+    }
+    case OPT_CREDITS: {
+        /* WindowOption m_CreditTex: a 640x960 page in the top-left of a 1024^2 texture (credits_ja.plist) */
+        const Atlas *c = &u->as->credits;
+        if (c->tex) {
+            SDL_Rect src = {0, 0, LOGICAL_W, LOGICAL_H};
+            spr_tl_rect(r, c, &src, 0, 0, LOGICAL_W, LOGICAL_H, 255);
+        }
+        break;
+    }
+    }
+    spr_tl_wh(r, u1, "sgnbutton_off", 14, 890, 120, 62, 255);
+    spr_tl(r, u1, "back", 46, 902, 255);
 }
 
 int ui_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
@@ -466,6 +745,10 @@ int ui_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
             }
         }
         break;
+    case SCENE_OPTION:
+        return option_event(u, e);
+    case SCENE_PV:
+        return pv_event(u, e, song, diff);
     case SCENE_SELECT:
         if (key) {
             if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) { stop_preview(u); play_sound(u->as, SND_CANCEL); return SCENE_TITLE; }
@@ -522,9 +805,10 @@ int ui_update(UiState *u, int *song, int *diff) {
         u->tick_acc -= 1000.0 / 30.0;
         u->ticks++;
         if (u->scene == SCENE_TITLE) title_tick(u);
-        else if (u->scene == SCENE_SELECT) select_tick(u);
+        else if (u->scene == SCENE_SELECT || u->scene == SCENE_PV) select_tick(u);
+        else if (u->scene == SCENE_OPTION) u->credits_t++;
     }
-    if (u->scene == SCENE_SELECT && u->preview_song != u->song && now - u->song_changed_ms > 350) {
+    if ((u->scene == SCENE_SELECT || u->scene == SCENE_PV) && u->preview_song != u->song && now - u->song_changed_ms > 350) {
         stop_preview(u);
         char path[1024];
         snprintf(path, sizeof path, "%s/%s.adx", u->as->appdir, u->gd->songs[u->song].preview);
@@ -586,8 +870,8 @@ static void render_title(UiState *u) {
             spr_tl(r, u1, "menubutton_l_base", x, y, 255);
             spr_tl(r, u1, pressed ? "menubutton_l_on" : "menubutton_l_off", x + 7, y + 7, 255);
             SDL_Color col = WHITE;
-            if (i > 0) col = (SDL_Color){200, 205, 215, 255};          /* not ported: dimmed label */
-            if (u->menu_flash > 0 && i == u->menu_focus && i > 0) col = (SDL_Color){255, 150, 150, 255};
+            if (i == 3) col = (SDL_Color){200, 205, 215, 255};         /* SHOP: not ported, dimmed */
+            if (u->menu_flash > 0 && i == u->menu_focus && i == 3) col = (SDL_Color){255, 150, 150, 255};
             font_draw(r, k_menu_label[i], x + 197, y + 25, 3.4f, col, 0);
             if (i == u->menu_focus) {
                 spr_tl(r, u1, "parenthesis_00", x + 8, y + 7, 255);
@@ -680,6 +964,24 @@ static void render_select(UiState *u) {
     }
 
     char buf[160];
+    if (u->scene == SCENE_PV) {
+        /* ScenePVSelect (help_02 panel 4): play mark on the jacket, selection text, toggle row */
+        const Atlas *sa = &u->as->saisei;
+        if (sa->tex) spr_tl(r, sa, "", 320 - sa->w / 2.0f, 420 - sa->h / 2.0f, 230);
+        snprintf(buf, sizeof buf, "1 SONG SELECTED [%d / %d]", u->song + 1, u->gd->nsongs);
+        font_draw(r, buf, 320, 700, 2.6f, WHITE, 0);
+        for (int i = 0; i < 5; i++) {
+            char name[32];
+            bool *f = pv_flag(u, i);
+            snprintf(name, sizeof name, "%s_%s", k_pv_icon[i], f && *f ? "on" : "off");
+            spr_tl(r, u1, name, 18 + 128.0f * i, 754, 255);
+            if (i == u->pv_focus) {
+                SDL_SetRenderDrawColor(r, 120, 240, 230, 255);
+                SDL_FRect fr = {18 + 128.0f * i - 2, 752, 113, 97};
+                SDL_RenderDrawRectF(r, &fr);
+            }
+        }
+    } else {
     int stars = u->diff < 4 ? si->stars[u->diff] : 9;   /* Break the Limit is always 9 */
     for (int s = 0; s < 10; s++)
         spr_tl(r, u1, s < stars ? "difficultystar_01" : "difficultystar_00", 320 - 5 * 34 + s * 34, 600, 255);
@@ -701,6 +1003,7 @@ static void render_select(UiState *u) {
         spr_tl(r, u1, "difficultycursor", u->csr_x, 777, 255);
     }
     spr_tl(r, u1, "baseline", 0, 824, 255);
+    }
 
     spr_tl_wh(r, u1, "sgnbutton_off", 14, 890, 120, 62, 255);   /* small back button (help_01 panel 2) */
     spr_tl(r, u1, "back", 46, 902, 255);
@@ -798,7 +1101,8 @@ void ui_render(UiState *u) {
     SDL_RenderClear(u->ren);
     switch (u->scene) {
     case SCENE_TITLE: render_title(u); break;
-    case SCENE_SELECT: render_select(u); break;
+    case SCENE_SELECT: case SCENE_PV: render_select(u); break;
+    case SCENE_OPTION: render_option(u); break;
     case SCENE_RESULT: render_result(u); break;
     default: break;
     }

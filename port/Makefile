@@ -1,12 +1,12 @@
-# Miku Flick/02 Linux port
+# Miku Flick/02 Linux port (the Android build lives in ../android)
 #   make                      build ./mikuflick
 #   make setup IPA=/path/x.ipa  extract your IPA and export game tables (one time)
 #   make run                  run from the project root with default paths
 
 CC      ?= cc
-PKGS     = sdl2 SDL2_image SDL2_ttf libavformat libavcodec libavutil libswresample libswscale
+PKGS     = sdl2 SDL2_image SDL2_ttf
 CFLAGS  ?= -O2 -g
-CFLAGS  += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter $(shell pkg-config --cflags $(PKGS))
+CFLAGS  += -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -Ithird_party $(shell pkg-config --cflags $(PKGS))
 LDLIBS   = $(shell pkg-config --libs $(PKGS)) -lm
 
 SRC = $(wildcard src/*.c)
@@ -18,7 +18,7 @@ all: mikuflick
 mikuflick: $(OBJ)
 	$(CC) -o $@ $(OBJ) $(LDLIBS)
 
-build/%.o: src/%.c src/mf.h | build
+build/%.o: src/%.c src/mf.h third_party/pl_mpeg.h | build
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 build:

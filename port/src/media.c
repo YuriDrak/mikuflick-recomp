@@ -1,120 +1,246 @@
 /*
- * libavformat/libavcodec glue replacing CRI Mana / CRI Atom / AudioToolbox:
- *  - media_decode_audio(): decode every audio stream of a .usm/.adx/.caf to
- *    interleaved S16 stereo @44.1 kHz in one demux pass
- *  - VideoStream: streaming MPEG-1 decode of the USM video track into an
- *    SDL IYUV texture, presented by media time (the audio clock drives it)
+ * Self-contained media decoding replacing CRI Mana / CRI Atom / AudioToolbox
+ * (and, since the Android port, FFmpeg):
+ *  - media_decode_audio(): CRI ADX (stand-alone .adx or the @SFA tracks of a
+ *    .usm) and Apple IMA4 (.caf) to interleaved S16 stereo @44.1 kHz
+ *  - VideoStream: the @SFV MPEG-1 elementary stream of a .usm, decoded with
+ *    pl_mpeg into an SDL IYUV texture and presented by media time
+ * Formats: docs/re_notes.md §1 and docs/archive_layout.md.
  */
 #include "mf.h"
 
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/channel_layout.h>
-#include <libavutil/imgutils.h>
-#include <libswresample/swresample.h>
-#include <libswscale/swscale.h>
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ---------------- audio ---------------- */
+#include "pl_mpeg.h"
 
-typedef struct {
-    int stream;
-    AVCodecContext *dec;
-    SwrContext *swr;
-    int16_t *buf;
-    size_t frames, cap;
-} ADec;
+static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
+static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static int16_t clip16(int v) { return (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
 
-static bool append_converted(ADec *d, const uint8_t **in, int in_count) {
-    int want = swr_get_out_samples(d->swr, in_count);
-    if (want < 0) return false;
-    if (d->frames + (size_t)want > d->cap) {
-        size_t nc = d->cap ? d->cap : 65536;
-        while (nc < d->frames + (size_t)want) nc *= 2;
-        int16_t *nb = realloc(d->buf, nc * 2 * sizeof(int16_t));
-        if (!nb) return false;
-        d->buf = nb;
-        d->cap = nc;
+/* ---------------- PCM output ---------------- */
+
+/* native interleaved S16 (1 or 2 channels, any rate) -> stereo @AUDIO_RATE (linear resampling) */
+static bool pcm_finish(const int16_t *src, size_t frames, int ch, int rate, Pcm *out) {
+    memset(out, 0, sizeof *out);
+    if (!frames || ch < 1 || rate <= 0) return false;
+    size_t n = rate == AUDIO_RATE ? frames : (size_t)((double)frames * AUDIO_RATE / rate);
+    if (!n) return false;
+    int16_t *d = malloc(n * 2 * sizeof *d);
+    if (!d) return false;
+    int c1 = ch > 1 ? 1 : 0;
+    if (rate == AUDIO_RATE) {
+        for (size_t i = 0; i < n; i++) {
+            d[i * 2] = src[i * ch];
+            d[i * 2 + 1] = src[i * ch + c1];
+        }
+    } else {
+        double step = (double)rate / AUDIO_RATE;
+        for (size_t i = 0; i < n; i++) {
+            double pos = i * step;
+            size_t a = (size_t)pos, b = a + 1 < frames ? a + 1 : a;
+            double fr = pos - a;
+            for (int k = 0; k < 2; k++) {
+                int c = k ? c1 : 0;
+                d[i * 2 + k] = clip16((int)lrint(src[a * ch + c] * (1 - fr) + src[b * ch + c] * fr));
+            }
+        }
     }
-    uint8_t *out[1] = {(uint8_t *)(d->buf + d->frames * 2)};
-    int got = swr_convert(d->swr, out, want, in, in_count);
-    if (got < 0) return false;
-    d->frames += (size_t)got;
+    out->pcm = d;
+    out->frames = n;
     return true;
 }
 
-static void drain(ADec *d, AVFrame *fr) {
-    while (avcodec_receive_frame(d->dec, fr) == 0) {
-        append_converted(d, (const uint8_t **)fr->extended_data, fr->nb_samples);
-        av_frame_unref(fr);
+/* ---------------- CRI ADX ---------------- */
+
+/* Standard ADX (encoding 3): 18-byte blocks per channel, 16-bit scale + 32 4-bit samples,
+   second-order prediction with coefficients derived from the high-pass cutoff. */
+static bool adx_decode(const uint8_t *b, size_t len, Pcm *out) {
+    if (len < 0x14 || b[0] != 0x80 || b[1] != 0x00) return false;
+    size_t start = (size_t)rd16(b + 2) + 4;
+    int enc = b[4], bs = b[5], bits = b[6], ch = b[7];
+    uint32_t rate = rd32(b + 8), total = rd32(b + 12);
+    int cutoff = rd16(b + 16);
+    if (enc != 3 || bits != 4 || bs < 3 || ch < 1 || ch > 2 || !rate || start >= len) {
+        log_msg("adx: unsupported stream (encoding %d, %d bits, block %d, %d ch)", enc, bits, bs, ch);
+        return false;
     }
+    int per_block = (bs - 2) * 8 / bits;
+    size_t nblocks = (len - start) / ((size_t)bs * (size_t)ch);
+    size_t cap = nblocks * (size_t)per_block;
+    if (total && total < cap) cap = total;
+    if (!cap) return false;
+
+    double a = M_SQRT2 - cos(2.0 * M_PI * cutoff / rate), bb = M_SQRT2 - 1.0;
+    double c = (a - sqrt((a + bb) * (a - bb))) / bb;
+    int c1 = (int)lrint(c * 2.0 * 4096), c2 = (int)lrint(-(c * c) * 4096);
+
+    int16_t *pcm = malloc(cap * (size_t)ch * sizeof *pcm);
+    if (!pcm) return false;
+    int s1[2] = {0, 0}, s2[2] = {0, 0};
+    size_t frames = 0;
+    for (size_t blk = 0; blk < nblocks && frames < cap; blk++) {
+        int got = per_block;
+        for (int k = 0; k < ch; k++) {
+            const uint8_t *p = b + start + (blk * (size_t)ch + (size_t)k) * (size_t)bs;
+            int scale = rd16(p);
+            if (scale & 0x8000) { got = -1; break; }   /* end-of-stream block */
+            for (int i = 0; i < per_block; i++) {
+                if (frames + (size_t)i >= cap) { got = i < got ? i : got; break; }
+                int byte = p[2 + i / 2];
+                int d = (i & 1) ? (byte & 15) : (byte >> 4);
+                if (d & 8) d -= 16;
+                int s0 = d * scale + ((c1 * s1[k] + c2 * s2[k]) >> 12);
+                s2[k] = s1[k];
+                s1[k] = clip16(s0);
+                pcm[(frames + (size_t)i) * (size_t)ch + (size_t)k] = (int16_t)s1[k];
+            }
+        }
+        if (got < 0) break;
+        frames += (size_t)got;
+    }
+    bool ok = pcm_finish(pcm, frames, ch, (int)rate, out);
+    free(pcm);
+    return ok;
+}
+
+/* ---------------- Apple IMA4 in CAF ---------------- */
+
+static const int k_ima_index[16] = {-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8};
+static const int k_ima_step[89] = {
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97,
+    107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+    876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871,
+    5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623,
+    27086, 29794, 32767};
+
+static double rd_f64(const uint8_t *p) {
+    uint64_t u = (uint64_t)rd32(p) << 32 | rd32(p + 4);
+    double d;
+    memcpy(&d, &u, sizeof d);
+    return d;
+}
+
+static bool caf_decode(const uint8_t *b, size_t len, Pcm *out) {
+    if (len < 8 || memcmp(b, "caff", 4)) return false;
+    double rate = 0;
+    uint32_t bpp = 0, fpp = 0, ch = 0;
+    bool ima4 = false;
+    const uint8_t *data = NULL;
+    size_t dlen = 0;
+    size_t pos = 8;
+    while (pos + 12 <= len) {
+        const uint8_t *c = b + pos;
+        uint64_t sz = (uint64_t)rd32(c + 4) << 32 | rd32(c + 8);
+        size_t body = pos + 12;
+        size_t avail = len - body;
+        if (!memcmp(c, "desc", 4) && avail >= 32) {
+            rate = rd_f64(b + body);
+            ima4 = !memcmp(b + body + 8, "ima4", 4);
+            bpp = rd32(b + body + 16);
+            fpp = rd32(b + body + 20);
+            ch = rd32(b + body + 24);
+        } else if (!memcmp(c, "data", 4)) {
+            size_t n = (sz == UINT64_MAX || sz > avail) ? avail : (size_t)sz;
+            if (n >= 4) { data = b + body + 4; dlen = n - 4; }   /* skip the edit count */
+            break;
+        }
+        if (sz == UINT64_MAX || sz > avail) break;
+        pos = body + (size_t)sz;
+    }
+    if (!ima4 || !data || ch < 1 || ch > 2 || fpp != 64 || bpp != 34 * ch || rate <= 0) {
+        log_msg("caf: unsupported format (only IMA4 is handled)");
+        return false;
+    }
+    size_t npk = dlen / bpp;
+    int16_t *pcm = malloc(npk * 64 * ch * sizeof *pcm);
+    if (!pcm) return false;
+    int pred[2] = {0, 0}, idx[2] = {0, 0};
+    for (size_t p = 0; p < npk; p++) {
+        for (uint32_t k = 0; k < ch; k++) {
+            const uint8_t *blk = data + p * bpp + k * 34;
+            int pre = (int16_t)rd16(blk);
+            int si = pre & 0x7f, pv = pre & ~0x7f;
+            if (si > 88) si = 88;
+            /* adpcm_ima_qt: keep the running predictor when the preamble only rounds it */
+            if (!(p > 0 && idx[k] == si && abs(pv - pred[k]) < 0x80)) { pred[k] = pv; idx[k] = si; }
+            for (int i = 0; i < 64; i++) {
+                int nib = (i & 1) ? blk[2 + i / 2] >> 4 : blk[2 + i / 2] & 15;
+                int step = k_ima_step[idx[k]];
+                int diff = step >> 3;
+                if (nib & 1) diff += step >> 2;
+                if (nib & 2) diff += step >> 1;
+                if (nib & 4) diff += step;
+                if (nib & 8) diff = -diff;
+                pred[k] = clip16(pred[k] + diff);
+                idx[k] += k_ima_index[nib];
+                if (idx[k] < 0) idx[k] = 0;
+                if (idx[k] > 88) idx[k] = 88;
+                pcm[(p * 64 + (size_t)i) * ch + k] = (int16_t)pred[k];
+            }
+        }
+    }
+    bool ok = pcm_finish(pcm, npk * 64, (int)ch, (int)lrint(rate), out);
+    free(pcm);
+    return ok;
+}
+
+/* ---------------- entry point ---------------- */
+
+typedef struct { uint8_t *b; size_t n, cap; } Bytes;
+
+static bool bytes_append(Bytes *d, const uint8_t *p, size_t n) {
+    if (d->n + n > d->cap) {
+        size_t nc = d->cap ? d->cap : 1 << 20;
+        while (nc < d->n + n) nc *= 2;
+        uint8_t *nb = realloc(d->b, nc);
+        if (!nb) return false;
+        d->b = nb;
+        d->cap = nc;
+    }
+    memcpy(d->b + d->n, p, n);
+    d->n += n;
+    return true;
 }
 
 int media_decode_audio(const char *path, Pcm *out, int max_streams) {
-    AVFormatContext *fc = NULL;
-    if (avformat_open_input(&fc, path, NULL, NULL) < 0) { log_msg("libav: cannot open %s", path); return 0; }
-    if (avformat_find_stream_info(fc, NULL) < 0) { avformat_close_input(&fc); return 0; }
-
-    ADec dec[4];
-    int n = 0;
     if (max_streams > 4) max_streams = 4;
-    for (unsigned i = 0; i < fc->nb_streams && n < max_streams; i++) {
-        AVStream *st = fc->streams[i];
-        if (st->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) { st->discard = AVDISCARD_ALL; continue; }
-        const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
-        if (!codec) continue;
-        ADec *d = &dec[n];
-        memset(d, 0, sizeof *d);
-        d->stream = (int)i;
-        d->dec = avcodec_alloc_context3(codec);
-        if (!d->dec || avcodec_parameters_to_context(d->dec, st->codecpar) < 0 || avcodec_open2(d->dec, codec, NULL) < 0) {
-            avcodec_free_context(&d->dec);
-            continue;
+    if (max_streams < 1) return 0;
+    uint8_t magic[4] = {0};
+    FILE *f = fopen(path, "rb");
+    if (!f) { log_msg("cannot open %s", path); return 0; }
+    size_t got = fread(magic, 1, 4, f);
+    fclose(f);
+    if (got < 4) return 0;
+
+    if (!memcmp(magic, "CRID", 4)) {   /* USM: every @SFA channel is a complete ADX stream */
+        Bytes tr[4] = {{0}};
+        UsmStream *s = usm_stream_open(path, "@SFA", -1);
+        size_t n;
+        int chno;
+        const uint8_t *p;
+        while (s && (p = usm_stream_next(s, &n, &chno)))
+            if (chno >= 0 && chno < max_streams) bytes_append(&tr[chno], p, n);
+        usm_stream_close(s);
+        int ntracks = 0;
+        for (int k = 0; k < max_streams; k++) {
+            if (tr[k].n && ntracks == k && adx_decode(tr[k].b, tr[k].n, &out[k])) ntracks++;
+            free(tr[k].b);
         }
-        AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
-        AVChannelLayout in_layout;
-        if (d->dec->ch_layout.nb_channels > 0) av_channel_layout_copy(&in_layout, &d->dec->ch_layout);
-        else av_channel_layout_default(&in_layout, 2);
-        if (swr_alloc_set_opts2(&d->swr, &stereo, AV_SAMPLE_FMT_S16, AUDIO_RATE, &in_layout, d->dec->sample_fmt,
-                                d->dec->sample_rate, 0, NULL) < 0 || swr_init(d->swr) < 0) {
-            av_channel_layout_uninit(&in_layout);
-            swr_free(&d->swr);
-            avcodec_free_context(&d->dec);
-            continue;
-        }
-        av_channel_layout_uninit(&in_layout);
-        n++;
-    }
-    /* streams beyond max are discarded too */
-    for (unsigned i = 0; i < fc->nb_streams; i++) {
-        bool used = false;
-        for (int k = 0; k < n; k++) used |= dec[k].stream == (int)i;
-        if (!used) fc->streams[i]->discard = AVDISCARD_ALL;
+        return ntracks;
     }
 
-    AVPacket *pkt = av_packet_alloc();
-    AVFrame *fr = av_frame_alloc();
-    while (pkt && fr && av_read_frame(fc, pkt) >= 0) {
-        for (int k = 0; k < n; k++) {
-            if (dec[k].stream != pkt->stream_index) continue;
-            if (avcodec_send_packet(dec[k].dec, pkt) == 0) drain(&dec[k], fr);
-        }
-        av_packet_unref(pkt);
-    }
-    for (int k = 0; k < n; k++) {
-        avcodec_send_packet(dec[k].dec, NULL);
-        drain(&dec[k], fr);
-        append_converted(&dec[k], NULL, 0); /* flush resampler */
-        out[k].pcm = dec[k].buf;
-        out[k].frames = dec[k].frames;
-        swr_free(&dec[k].swr);
-        avcodec_free_context(&dec[k].dec);
-    }
-    av_frame_free(&fr);
-    av_packet_free(&pkt);
-    avformat_close_input(&fc);
-    return n;
+    size_t len;
+    uint8_t *data = read_file(path, &len);
+    if (!data) return 0;
+    bool ok = false;
+    if (magic[0] == 0x80 && magic[1] == 0x00) ok = adx_decode(data, len, &out[0]);
+    else if (!memcmp(magic, "caff", 4)) ok = caf_decode(data, len, &out[0]);
+    else log_msg("%s: unknown audio format", path);
+    free(data);
+    return ok ? 1 : 0;
 }
 
 void pcm_free(Pcm *p) {
@@ -126,48 +252,52 @@ void pcm_free(Pcm *p) {
 /* ---------------- video ---------------- */
 
 struct VideoStream {
-    AVFormatContext *fc;
-    AVCodecContext *dec;
-    int vidx;
-    double tb;
-    AVPacket *pkt;
-    AVFrame *pending;       /* decoded, waiting for its presentation time */
-    AVFrame *cur;           /* newest due frame (uploaded) */
-    bool has_pending;
-    double pending_pts;
-    double frame_dur;
-    long frame_no;
+    UsmStream *usm;
+    plm_buffer_t *buf;
+    plm_video_t *dec;
+    double fps;
+    long frame_no;          /* frames decoded so far; frame k is due at k / fps */
     bool eof;
-    SDL_Renderer *ren;
     SDL_Texture *tex;
     bool shown;
-    struct SwsContext *sws;
-    uint8_t *conv[4];
-    int conv_ls[4];
 };
+
+/* pl_mpeg pulls more bytes: feed the next @SFV payloads */
+static void video_feed(plm_buffer_t *b, void *user) {
+    VideoStream *v = user;
+    size_t fed = 0, n;
+    const uint8_t *p;
+    while (fed < 64 * 1024 && v->usm && (p = usm_stream_next(v->usm, &n, NULL))) {
+        plm_buffer_write(b, (uint8_t *)p, n);
+        fed += n;
+    }
+    if (!fed) {   /* end of stream: lets pl_mpeg flush the last reference frame */
+        usm_stream_close(v->usm);
+        v->usm = NULL;
+        plm_buffer_signal_end(b);
+    }
+}
 
 VideoStream *video_open(const char *path, SDL_Renderer *ren) {
     VideoStream *v = calloc(1, sizeof *v);
     if (!v) return NULL;
-    v->ren = ren;
-    if (avformat_open_input(&v->fc, path, NULL, NULL) < 0 || avformat_find_stream_info(v->fc, NULL) < 0) goto fail;
-    v->vidx = av_find_best_stream(v->fc, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    if (v->vidx < 0) goto fail;
-    for (unsigned i = 0; i < v->fc->nb_streams; i++)
-        if ((int)i != v->vidx) v->fc->streams[i]->discard = AVDISCARD_ALL;
-    AVStream *st = v->fc->streams[v->vidx];
-    const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
-    if (!codec) goto fail;
-    v->dec = avcodec_alloc_context3(codec);
-    if (!v->dec || avcodec_parameters_to_context(v->dec, st->codecpar) < 0 || avcodec_open2(v->dec, codec, NULL) < 0) goto fail;
-    v->tb = av_q2d(st->time_base);
-    AVRational fr = av_guess_frame_rate(v->fc, st, NULL);
-    v->frame_dur = (fr.num > 0 && fr.den > 0) ? (double)fr.den / fr.num : 1.0 / 20.0;
-    v->pkt = av_packet_alloc();
-    v->pending = av_frame_alloc();
-    v->cur = av_frame_alloc();
-    v->tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, v->dec->width, v->dec->height);
-    if (!v->pkt || !v->pending || !v->cur || !v->tex) goto fail;
+    v->usm = usm_stream_open(path, "@SFV", 0);
+    if (!v->usm) goto fail;
+    v->buf = plm_buffer_create_with_capacity(256 * 1024);
+    if (!v->buf) goto fail;
+    plm_buffer_set_load_callback(v->buf, video_feed, v);
+    v->dec = plm_video_create_with_buffer(v->buf, 0);
+    if (!v->dec || !plm_video_has_header(v->dec)) goto fail;
+    /* VIDEO_HDRINFO: 20 fps (MPEG-1 cannot signal it) and mpeg_dcprec = 11, the TMPGEnc
+       11-bit intra DC extension that plain MPEG-1 decoders get wrong (pl_mpeg is patched) */
+    int dcprec = 8;
+    usm_video_info(path, &v->fps, &dcprec);
+    plm_video_set_intra_dc_precision(v->dec, dcprec - 8);
+    if (v->fps <= 0) v->fps = plm_video_get_framerate(v->dec);
+    if (v->fps <= 0) v->fps = 20.0;
+    v->tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, plm_video_get_width(v->dec),
+                               plm_video_get_height(v->dec));
+    if (!v->tex) goto fail;
     return v;
 fail:
     log_msg("video: cannot open %s", path);
@@ -175,62 +305,23 @@ fail:
     return NULL;
 }
 
-static bool decode_next(VideoStream *v) {
-    for (;;) {
-        int r = avcodec_receive_frame(v->dec, v->pending);
-        if (r == 0) {
-            int64_t ts = v->pending->best_effort_timestamp;
-            v->pending_pts = (ts != AV_NOPTS_VALUE) ? ts * v->tb : v->frame_no * v->frame_dur;
-            v->frame_no++;
-            v->has_pending = true;
-            return true;
-        }
-        if (r == AVERROR_EOF) { v->eof = true; return false; }
-        if (r != AVERROR(EAGAIN)) { v->eof = true; return false; }
-        /* need input */
-        for (;;) {
-            int rr = av_read_frame(v->fc, v->pkt);
-            if (rr < 0) { avcodec_send_packet(v->dec, NULL); break; }
-            if (v->pkt->stream_index == v->vidx) {
-                avcodec_send_packet(v->dec, v->pkt);
-                av_packet_unref(v->pkt);
-                break;
-            }
-            av_packet_unref(v->pkt);
-        }
-    }
-}
-
-static void upload(VideoStream *v, AVFrame *f) {
-    if (f->format == AV_PIX_FMT_YUV420P || f->format == AV_PIX_FMT_YUVJ420P) {
-        SDL_UpdateYUVTexture(v->tex, NULL, f->data[0], f->linesize[0], f->data[1], f->linesize[1], f->data[2], f->linesize[2]);
-    } else {
-        if (!v->sws) {
-            v->sws = sws_getContext(f->width, f->height, f->format, f->width, f->height, AV_PIX_FMT_YUV420P,
-                                    SWS_BILINEAR, NULL, NULL, NULL);
-            if (!v->sws || av_image_alloc(v->conv, v->conv_ls, f->width, f->height, AV_PIX_FMT_YUV420P, 16) < 0) return;
-        }
-        sws_scale(v->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, v->conv, v->conv_ls);
-        SDL_UpdateYUVTexture(v->tex, NULL, v->conv[0], v->conv_ls[0], v->conv[1], v->conv_ls[1], v->conv[2], v->conv_ls[2]);
-    }
-    v->shown = true;
-}
-
 void video_update(VideoStream *v, double t) {
     if (!v) return;
+    plm_frame_t *last = NULL;
     int decoded = 0;
-    bool have_new = false;
-    for (;;) {
-        if (!v->has_pending && (v->eof || !decode_next(v))) break;
-        if (v->pending_pts > t) break;
-        /* frame is due: keep it as the newest candidate, look at the next one */
-        av_frame_unref(v->cur);
-        av_frame_move_ref(v->cur, v->pending);
-        v->has_pending = false;
-        have_new = true;
+    while (!v->eof && (double)v->frame_no / v->fps <= t) {
+        plm_frame_t *f = plm_video_decode(v->dec);
+        if (!f) { v->eof = true; break; }
+        v->frame_no++;
+        last = f;
         if (++decoded > 240) break; /* never stall the main loop on a long catch-up */
     }
-    if (have_new) upload(v, v->cur);
+    if (last) {   /* the frame stays valid until the next plm_video_decode */
+        SDL_Rect r = {0, 0, (int)last->width, (int)last->height};
+        SDL_UpdateYUVTexture(v->tex, &r, last->y.data, (int)last->y.width, last->cb.data, (int)last->cb.width,
+                             last->cr.data, (int)last->cr.width);
+        v->shown = true;
+    }
 }
 
 SDL_Texture *video_texture(VideoStream *v) { return (v && v->shown) ? v->tex : NULL; }
@@ -238,12 +329,8 @@ SDL_Texture *video_texture(VideoStream *v) { return (v && v->shown) ? v->tex : N
 void video_close(VideoStream *v) {
     if (!v) return;
     if (v->tex) SDL_DestroyTexture(v->tex);
-    av_frame_free(&v->pending);
-    av_frame_free(&v->cur);
-    av_packet_free(&v->pkt);
-    avcodec_free_context(&v->dec);
-    if (v->fc) avformat_close_input(&v->fc);
-    sws_freeContext(v->sws);
-    if (v->conv[0]) av_freep(&v->conv[0]);
+    if (v->dec) plm_video_destroy(v->dec);
+    if (v->buf) plm_buffer_destroy(v->buf);
+    usm_stream_close(v->usm);
     free(v);
 }

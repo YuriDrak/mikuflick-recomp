@@ -1,12 +1,12 @@
 /*
- * Miku Flick/02 Linux port - shared declarations.
+ * Miku Flick/02 Linux/Android port - shared declarations.
  * Clean-room reimplementation; see docs/re_notes.md for the reverse-engineered
  * behaviour each module reproduces and docs/linux_port_plan.md for the design.
  */
 #ifndef MF_H
 #define MF_H
 
-#include <SDL2/SDL.h>
+#include <SDL.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -28,7 +28,8 @@ enum { SND_COOL_SP = 0, SND_HIT = 1, SND_SAD = 2, SND_INTERLUDE = 3, SND_DECIDE 
        SND_SAFE = 18, SND_BGM01 = 22, SND_SEGA = 27, SND_TITLE = 28 };
 
 /* scene ids (SceneManager) */
-enum { SCENE_BOOT = 0, SCENE_TITLE = 1, SCENE_GAME = 2, SCENE_SELECT = 3, SCENE_RESULT = 8, SCENE_QUIT = 99 };
+enum { SCENE_BOOT = 0, SCENE_TITLE = 1, SCENE_GAME = 2, SCENE_SELECT = 3, SCENE_PV = 4, SCENE_OPTION = 6,
+       SCENE_RESULT = 8, SCENE_QUIT = 99 };
 
 /* ---------------- util.c ---------------- */
 void *read_file(const char *path, size_t *len);
@@ -108,6 +109,13 @@ typedef struct { uint32_t time_ms; char *param; } Cue;
 typedef struct { Cue *cues; int n; uint32_t time_unit; } CueList;
 bool usm_read_cues(const char *path, CueList *out);
 void cuelist_free(CueList *c);
+/* stream payloads (data_type 0) of one chunk type, e.g. "@SFV" / "@SFA"; chno -1 = every channel */
+typedef struct UsmStream UsmStream;
+UsmStream *usm_stream_open(const char *path, const char *sig, int chno);
+const uint8_t *usm_stream_next(UsmStream *s, size_t *len, int *chno); /* valid until the next call; NULL at end */
+void usm_stream_close(UsmStream *s);
+/* VIDEO_HDRINFO: frame rate (framerate_n/framerate_d) and intra DC precision in bits (mpeg_dcprec, 8..11) */
+bool usm_video_info(const char *path, double *fps, int *dcprec);
 
 /* ---------------- media.c ---------------- */
 typedef struct { int16_t *pcm; size_t frames; } Pcm; /* interleaved stereo S16 @ AUDIO_RATE */
@@ -137,12 +145,26 @@ int mixer_sfx_play(const Pcm *p, float gain, bool loop);
 void mixer_sfx_stop(int voice);
 void mixer_sfx_stop_all(void);
 
+/* ---------------- view.c ---------------- */
+/* Scenes draw into a 640x960 target between view_begin and view_present, which shows
+   it centred and fills the bars of non-2:3 screens with a blurred backdrop (NULL = scene). */
+bool view_init(SDL_Renderer *ren);
+void view_quit(void);
+bool view_active(void);              /* false: SDL logical-size fallback (no render targets) */
+void view_begin(SDL_Renderer *ren);
+void view_present(SDL_Renderer *ren, SDL_Texture *backdrop);
+void view_window_to_logical(SDL_Renderer *ren, float wx, float wy, float *lx, float *ly); /* window points */
+void view_capture_size(SDL_Renderer *ren, int *w, int *h);   /* size SDL_RenderReadPixels returns */
+
 /* ---------------- assets ---------------- */
 typedef struct {
     const char *appdir;
-    Atlas game1, game2, effect1, ui1, ui2, ui5, bg_title, bg_select, bg_result;
+    Atlas game1, game2, effect1, ui1, ui2, ui3, ui4, ui5, bg_title, bg_select, bg_result, bg_options;
+    Atlas game2_kb[2];      /* key faces for KEYBOARD option 1/2: game_tex_02_fullroman / _romanhira (frames of game_tex_02) */
     Atlas kana_tex[4];      /* mf_hiragana_blank, mf_hiragana_telop, mf_katakana_blank, mf_katakana_telop */
     Atlas logos[3];         /* logo_sega, logo_crypton, logo_cri */
+    Atlas help[2], credits; /* help_01/02, credits_en */
+    Atlas saisei;           /* PV select: play mark on the jacket */
     Atlas launch;
     Pcm sounds[NUM_SOUNDS];
 } Assets;
@@ -151,24 +173,32 @@ bool assets_load(Assets *as, SDL_Renderer *ren, const GameData *gd, const char *
 void assets_free(Assets *as);
 void play_sound(Assets *as, int id);
 
-/* ---------------- save.c ---------------- */
-typedef struct { int score, rank, combo, cleared; } Record;
-typedef struct {
-    Record rec[MAX_SONGS][NUM_DIFF];
-    char path[1024];
-} SaveData;
-void save_load(SaveData *s, const char *dir);
-void save_write(const SaveData *s);
-
 /* ---------------- options ---------------- */
 typedef struct {
     int input_timing;        /* MusicData GetInputTiming (calibration steps) */
     float bgm_volume, se_volume;
     bool fail_sound;         /* StatusData IsDisableFailSound inverted */
+    bool left_hand;          /* HANDEDNESS: tension gauge on the right */
+    int keyboard;            /* KEYBOARD: 0 original, 1 full romaji, 2 romaji+hiragana */
+    bool flower;             /* DISPLAY: flick "flower" guide around a held key */
+    bool guide_panel;        /* DISPLAY: guide cursor/arrow on the next key */
+    /* PV viewer (ScenePVSelect / ScenePVView): set by the UI before starting playback */
+    bool pv_mode, pv_lyrics, pv_karaoke, pv_loop, pv_shuffle;
     bool autoplay;           /* debug: perfect autoplay */
     bool autoplay_input;     /* debug: autoplay through synthetic keyboard/mouse events */
     int start_song, start_diff;   /* -1 = go through menus */
 } Options;
+
+/* ---------------- save.c ---------------- */
+typedef struct { int score, rank, combo, cleared; } Record;
+typedef struct {
+    Record rec[MAX_SONGS][NUM_DIFF];
+    bool has_opt;            /* options stored in the save file */
+    Options opt;             /* only the persistent fields are used */
+    char path[1024];
+} SaveData;
+void save_load(SaveData *s, const char *dir);
+void save_write(const SaveData *s);
 
 /* ---------------- game.c ---------------- */
 typedef struct Game Game;
@@ -183,6 +213,8 @@ typedef struct {
 Game *game_create(SDL_Renderer *ren, Assets *as, const GameData *gd, const Options *opt, int song, int diff);
 void game_destroy(Game *g);
 void game_event(Game *g, const SDL_Event *e);
+void game_pause(Game *g);            /* open the pause menu (app sent to the background) */
+SDL_Texture *game_backdrop(const Game *g);   /* song video for the screen bars, NULL before the first frame */
 bool game_update(Game *g);           /* false when finished */
 void game_render(Game *g);
 void game_result(const Game *g, GameResult *out);

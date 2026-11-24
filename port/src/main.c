@@ -1,19 +1,114 @@
 /*
- * Miku Flick/02 Linux port - entry point and scene loop.
+ * Miku Flick/02 Linux/Android port - entry point and scene loop.
  *
  * Usage: mikuflick [--app DIR] [--gamedata FILE] [--data DIR] [--song N --diff D]
  *                  [--autoplay] [--exit-after-song] [--offset N] [--volume F]
  *                  [--se-volume F] [--no-fail-sound] [--fullscreen] [--window WxH]
+ *
+ * On Android the arguments come from the launch intent (extra "args"), the game
+ * data is read from the app's external files directory and saves go to its
+ * internal files directory (see android/README.md).
  */
 #include "mf.h"
 
-#include <SDL2/SDL_image.h>
-#include <libavutil/log.h>
+#include <SDL_image.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 void game_set_highscore(Game *g, int hs);
+
+/* The menus and the pause/PV controls react to the left mouse button. A touchscreen's
+   first finger is turned into such mouse events (marked SDL_TOUCH_MOUSEID, in logical
+   coordinates); the flick board itself keeps using the raw multi-touch events. */
+static SDL_FingerID g_primary;
+static bool g_primary_down;
+
+static bool finger_to_mouse(SDL_Renderer *ren, const SDL_Event *e, SDL_Event *out) {
+    if (e->type != SDL_FINGERDOWN && e->type != SDL_FINGERMOTION && e->type != SDL_FINGERUP) return false;
+    if (e->type == SDL_FINGERDOWN) {
+        if (g_primary_down) return false;
+        g_primary_down = true;
+        g_primary = e->tfinger.fingerId;
+    } else if (!g_primary_down || e->tfinger.fingerId != g_primary) {
+        return false;
+    }
+    if (e->type == SDL_FINGERUP) g_primary_down = false;
+    int ww, wh;
+    SDL_GetWindowSize(SDL_RenderGetWindow(ren), &ww, &wh);
+    float lx, ly;
+    view_window_to_logical(ren, e->tfinger.x * ww, e->tfinger.y * wh, &lx, &ly);
+    memset(out, 0, sizeof *out);
+    if (e->type == SDL_FINGERMOTION) {
+        out->type = SDL_MOUSEMOTION;
+        out->motion.timestamp = e->tfinger.timestamp;
+        out->motion.which = SDL_TOUCH_MOUSEID;
+        out->motion.state = SDL_BUTTON_LMASK;
+        out->motion.x = (int)lx;
+        out->motion.y = (int)ly;
+    } else {
+        out->type = e->type == SDL_FINGERDOWN ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+        out->button.timestamp = e->tfinger.timestamp;
+        out->button.which = SDL_TOUCH_MOUSEID;
+        out->button.button = SDL_BUTTON_LEFT;
+        out->button.state = e->type == SDL_FINGERDOWN ? SDL_PRESSED : SDL_RELEASED;
+        out->button.clicks = 1;
+        out->button.x = (int)lx;
+        out->button.y = (int)ly;
+    }
+    return true;
+}
+
+/* Real mouse events arrive in window points; the scenes work in the 640x960 space. */
+static void map_mouse(SDL_Renderer *ren, SDL_Event *e) {
+    if (!view_active()) return;   /* SDL's logical-size fallback already scaled them */
+    float lx, ly;
+    if ((e->type == SDL_MOUSEBUTTONDOWN || e->type == SDL_MOUSEBUTTONUP) && e->button.which != SDL_TOUCH_MOUSEID) {
+        view_window_to_logical(ren, (float)e->button.x, (float)e->button.y, &lx, &ly);
+        e->button.x = (int)lx;
+        e->button.y = (int)ly;
+    } else if (e->type == SDL_MOUSEMOTION && e->motion.which != SDL_TOUCH_MOUSEID) {
+        view_window_to_logical(ren, (float)e->motion.x, (float)e->motion.y, &lx, &ly);
+        e->motion.x = (int)lx;
+        e->motion.y = (int)ly;
+    }
+}
+
+#ifdef __ANDROID__
+/* Shown instead of exiting silently when the user's game data is missing. */
+static void error_screen(SDL_Renderer *ren, const char *title, const char *detail, const char *path) {
+    char lines[12][48];
+    int n = 0;
+    for (const char *p = path; *p && n < 12;) {   /* wrap the path after '/' */
+        int len = (int)strlen(p), cut = len;
+        if (len > 34) {
+            cut = 34;
+            while (cut > 8 && p[cut - 1] != '/') cut--;
+        }
+        snprintf(lines[n++], sizeof lines[0], "%.*s", cut, p);
+        p += cut;
+    }
+    SDL_Color w = {255, 255, 255, 255}, c = {120, 230, 220, 255};
+    for (;;) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e))
+            if (e.type == SDL_QUIT || e.type == SDL_FINGERUP || e.type == SDL_MOUSEBUTTONUP ||
+                (e.type == SDL_KEYDOWN && (e.key.keysym.sym == SDLK_AC_BACK || e.key.keysym.sym == SDLK_ESCAPE)))
+                return;
+        view_begin(ren);
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+        SDL_RenderClear(ren);
+        font_draw(ren, title, LOGICAL_W / 2, 220, 3.2f, w, 0);
+        font_draw(ren, detail, LOGICAL_W / 2, 320, 2.0f, w, 0);
+        font_draw(ren, "Copy MikuFlick2.app and gamedata.txt to:", LOGICAL_W / 2, 400, 2.0f, w, 0);
+        for (int i = 0; i < n; i++) font_draw(ren, lines[i], LOGICAL_W / 2, 460 + i * 34, 2.0f, c, 0);
+        font_draw(ren, "(make -C android push)", LOGICAL_W / 2, 480 + n * 34, 2.0f, w, 0);
+        font_draw(ren, "Tap to close", LOGICAL_W / 2, 820, 2.4f, w, 0);
+        view_present(ren, NULL);
+        SDL_Delay(30);
+    }
+}
+#endif
 
 static void usage(void) {
     puts("mikuflick - Linux port of Miku Flick/02 (requires your own extracted IPA)\n"
@@ -34,8 +129,10 @@ int main(int argc, char **argv) {
     const char *appdir = "extracted/ipa/Payload/MikuFlick2.app";
     const char *gamedata = "port/data/gamedata.txt";
     char datadir[1024] = "";
-    Options opt = {.input_timing = 0, .bgm_volume = 1.0f, .se_volume = 1.0f, .fail_sound = true,
-                   .autoplay = false, .autoplay_input = false, .start_song = -1, .start_diff = 1};
+    Options opt = {.input_timing = 0, .bgm_volume = 1.0f, .se_volume = 1.0f, .fail_sound = true, .left_hand = false,
+                   .keyboard = 0, .flower = true, .guide_panel = true, .autoplay = false, .autoplay_input = false,
+                   .start_song = -1, .start_diff = 1};
+    bool cli_timing = false, cli_bgm = false, cli_se = false, cli_fail = false;
     bool exit_after = false, fullscreen = false;
     const char *shot_dir = NULL;      /* testing: PNG captures */
     const char *font_path = NULL;     /* --font PATH, or "none" for the bitmap font */
@@ -48,6 +145,21 @@ int main(int argc, char **argv) {
     Uint32 prog_start = 0;
     int win_w = 480, win_h = 720;
 
+#ifdef __ANDROID__
+    /* user-supplied data: /storage/emulated/0/Android/data/<package>/files (adb-writable, no permission needed) */
+    static char android_app[1024], android_gd[1024], android_files[1024];
+    const char *ext = SDL_AndroidGetExternalStoragePath();
+    snprintf(android_files, sizeof android_files, "%s", ext ? ext : ".");
+    snprintf(android_app, sizeof android_app, "%s/MikuFlick2.app", android_files);
+    snprintf(android_gd, sizeof android_gd, "%s/gamedata.txt", android_files);
+    appdir = android_app;
+    gamedata = android_gd;
+    const char *internal = SDL_AndroidGetInternalStoragePath();
+    if (internal) snprintf(datadir, sizeof datadir, "%s", internal);
+    font_path = "MPLUS1p-Bold.ttf";   /* APK asset (port/fonts) */
+    fullscreen = true;
+#endif
+
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -56,11 +168,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--data") && v) { snprintf(datadir, sizeof datadir, "%s", v); i++; }
         else if (!strcmp(a, "--song") && v) { opt.start_song = atoi(v); i++; }
         else if (!strcmp(a, "--diff") && v) { opt.start_diff = atoi(v); i++; }
-        else if (!strcmp(a, "--offset") && v) { opt.input_timing = atoi(v); i++; }
-        else if (!strcmp(a, "--volume") && v) { opt.bgm_volume = (float)atof(v); i++; }
-        else if (!strcmp(a, "--se-volume") && v) { opt.se_volume = (float)atof(v); i++; }
+        else if (!strcmp(a, "--offset") && v) { opt.input_timing = atoi(v); cli_timing = true; i++; }
+        else if (!strcmp(a, "--volume") && v) { opt.bgm_volume = (float)atof(v); cli_bgm = true; i++; }
+        else if (!strcmp(a, "--se-volume") && v) { opt.se_volume = (float)atof(v); cli_se = true; i++; }
         else if (!strcmp(a, "--window") && v) { sscanf(v, "%dx%d", &win_w, &win_h); i++; }
-        else if (!strcmp(a, "--no-fail-sound")) opt.fail_sound = false;
+        else if (!strcmp(a, "--no-fail-sound")) { opt.fail_sound = false; cli_fail = true; }
         else if (!strcmp(a, "--autoplay")) opt.autoplay = true;
         else if (!strcmp(a, "--autoplay-input")) opt.autoplay_input = true;
         else if (!strcmp(a, "--exit-after-song")) exit_after = true;
@@ -97,7 +209,7 @@ int main(int argc, char **argv) {
             i++;
         }
         else if (!strcmp(a, "--start-scene") && v) {
-            start_scene = !strcmp(v, "select") ? SCENE_SELECT : !strcmp(v, "title") ? SCENE_TITLE : !strcmp(v, "result") ? SCENE_RESULT : SCENE_BOOT;
+            start_scene = !strcmp(v, "select") ? SCENE_SELECT : !strcmp(v, "title") ? SCENE_TITLE : !strcmp(v, "result") ? SCENE_RESULT : !strcmp(v, "options") ? SCENE_OPTION : !strcmp(v, "pv") ? SCENE_PV : SCENE_BOOT;
             i++;
         }
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) { usage(); return 0; }
@@ -108,25 +220,35 @@ int main(int argc, char **argv) {
         if (x && *x) snprintf(datadir, sizeof datadir, "%s/mikuflick-port", x);
         else snprintf(datadir, sizeof datadir, "%s/.local/share/mikuflick-port", h ? h : ".");
     }
-    av_log_set_level(AV_LOG_ERROR);
 
     static GameData gd;
+#ifndef __ANDROID__   /* Android reports missing data on screen, after the window exists */
     if (!gamedata_load(&gd, gamedata)) return 1;
     if (opt.start_song >= gd.nsongs) { fprintf(stderr, "song out of range (0-%d)\n", gd.nsongs - 1); return 1; }
+#endif
     if (opt.start_diff < 0 || opt.start_diff >= NUM_DIFF) opt.start_diff = 1;
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) != 0) { log_msg("SDL: %s", SDL_GetError()); return 1; }
     IMG_Init(IMG_INIT_PNG);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
-    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");   /* main loop maps the first finger itself */
+    SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait PortraitUpsideDown");
     SDL_Window *win = SDL_CreateWindow("Miku Flick/02 (Linux port)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        win_w, win_h, SDL_WINDOW_RESIZABLE | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     if (!win) { log_msg("window: %s", SDL_GetError()); return 1; }
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!ren) ren = SDL_CreateRenderer(win, -1, 0);
     if (!ren) { log_msg("renderer: %s", SDL_GetError()); return 1; }
-    SDL_RenderSetLogicalSize(ren, LOGICAL_W, LOGICAL_H);
+    view_init(ren);   /* 640x960 scene, centred; bars filled (view.c) */
     text_init(font_path);
+#ifdef __ANDROID__
+    if (!gamedata_load(&gd, gamedata)) {
+        error_screen(ren, "Game data not found", "gamedata.txt is missing.", android_files);
+        return 1;
+    }
+    if (opt.start_song >= gd.nsongs) opt.start_song = -1;
+#endif
 
     if (!mixer_init()) log_msg("continuing without audio device");
     mixer_set_master(1.0f, opt.se_volume);
@@ -134,22 +256,37 @@ int main(int argc, char **argv) {
     /* SceneBoot @0xf978: bg_tex_08 splash (640x960 region, on white) while everything loads */
     {
         Atlas splash;
+        view_begin(ren);
         SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
         SDL_RenderClear(ren);
         if (atlas_load(&splash, ren, appdir, "bg_tex_08")) {
             SDL_Rect src = {0, 0, LOGICAL_W, LOGICAL_H};
             spr_tl_rect(ren, &splash, &src, 0, 0, LOGICAL_W, LOGICAL_H, 255);
-            SDL_RenderPresent(ren);
+            view_present(ren, NULL);
             atlas_free(&splash);
         }
     }
     static Assets as;
     if (!assets_load(&as, ren, &gd, appdir)) {
         log_msg("asset loading failed - is --app pointing at the extracted MikuFlick2.app?");
+#ifdef __ANDROID__
+        error_screen(ren, "Game data not found", "MikuFlick2.app is missing or incomplete.", android_files);
+#endif
         return 1;
     }
     static SaveData save;
     save_load(&save, datadir);
+    if (save.has_opt) {   /* options saved from the OPTIONS screen; command-line flags win */
+        if (!cli_timing) opt.input_timing = save.opt.input_timing;
+        if (!cli_bgm) opt.bgm_volume = save.opt.bgm_volume;
+        if (!cli_se) opt.se_volume = save.opt.se_volume;
+        if (!cli_fail) opt.fail_sound = save.opt.fail_sound;
+        opt.left_hand = save.opt.left_hand;
+        opt.keyboard = save.opt.keyboard;
+        opt.flower = save.opt.flower;
+        opt.guide_panel = save.opt.guide_panel;
+        mixer_set_master(1.0f, opt.se_volume);
+    }
     UiState *ui = ui_create(ren, &as, &gd, &save, &opt);
     Game *game = NULL;
 
@@ -167,12 +304,13 @@ int main(int argc, char **argv) {
     prog_start = SDL_GetTicks();
     while (scene != SCENE_QUIT) {
         if (scene == SCENE_GAME && !game) {
+            view_begin(ren);
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
             SDL_RenderClear(ren);
             SDL_Color w = {255, 255, 255, 255};
             font_draw(ren, "LOADING", LOGICAL_W / 2, LOGICAL_H / 2 - 20, 6, w, 0);
             spr_draw(ren, &as.ui2, "loading", LOGICAL_W / 2, LOGICAL_H / 2 + 80, 1.0f, 255);
-            SDL_RenderPresent(ren);
+            view_present(ren, NULL);
             game = game_create(ren, &as, &gd, &opt, song, diff);
             if (!game) {
                 if (exit_after) { exit_code = 2; break; }
@@ -193,16 +331,31 @@ int main(int argc, char **argv) {
         SDL_Event e;
         int next = -1;
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) { next = SCENE_QUIT; break; }
+            if (e.type == SDL_QUIT || e.type == SDL_APP_TERMINATING) { next = SCENE_QUIT; break; }
+            if (e.type == SDL_APP_WILLENTERBACKGROUND) {   /* Android/iOS: the process may be killed while away */
+                if (scene == SCENE_GAME && game) game_pause(game);
+                save_write(&save);
+                continue;
+            }
+            if (e.type == SDL_RENDER_DEVICE_RESET) log_msg("render device reset: textures may be lost");
             if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F11) {
                 Uint32 fl = SDL_GetWindowFlags(win);
                 SDL_SetWindowFullscreen(win, (fl & SDL_WINDOW_FULLSCREEN_DESKTOP) ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
                 continue;
             }
-            if (scene == SCENE_GAME) game_event(game, &e);
-            else {
+            /* Android back button behaves like Esc (cancel, pause, leave the PV) */
+            if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && e.key.keysym.sym == SDLK_AC_BACK)
+                e.key.keysym.sym = SDLK_ESCAPE;
+            map_mouse(ren, &e);
+            SDL_Event m;
+            bool has_m = finger_to_mouse(ren, &e, &m);
+            if (scene == SCENE_GAME) {
+                game_event(game, &e);
+                if (has_m) game_event(game, &m);
+            } else {
                 int n = ui_event(ui, &e, &song, &diff);
                 if (n >= 0) next = n;
+                if (has_m && next < 0 && (n = ui_event(ui, &m, &song, &diff)) >= 0) next = n;
             }
         }
 
@@ -223,6 +376,17 @@ int main(int argc, char **argv) {
                     break;
                 }
                 if (res.rank == -2) { scene = SCENE_GAME; continue; }   /* pause menu RETRY */
+                if (opt.pv_mode) {   /* PV view finished (-3) or left (-1) */
+                    if (res.rank == -3 && (opt.pv_loop || opt.pv_shuffle)) {
+                        if (opt.pv_shuffle && gd.nsongs > 1) { int s2; do s2 = rand() % gd.nsongs; while (s2 == song); song = s2; }
+                        scene = SCENE_GAME;
+                        continue;
+                    }
+                    opt.pv_mode = false;
+                    ui_enter(ui, SCENE_PV, NULL);
+                    scene = SCENE_PV;
+                    continue;
+                }
                 next = res.rank < 0 ? SCENE_SELECT : SCENE_RESULT;
                 ui_enter(ui, next, res.rank < 0 ? NULL : &res);
                 scene = next;
@@ -239,6 +403,7 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        view_begin(ren);
         if (scene == SCENE_GAME && game) game_render(game);
         else ui_render(ui);
 
@@ -258,7 +423,7 @@ int main(int argc, char **argv) {
             }
             if (shot[0]) {
                 int ow, oh;
-                SDL_GetRendererOutputSize(ren, &ow, &oh);
+                view_capture_size(ren, &ow, &oh);
                 SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, ow, oh, 32, SDL_PIXELFORMAT_ARGB8888);
                 if (s && SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, s->pixels, s->pitch) == 0) {
                     IMG_SavePNG(s, shot);
@@ -267,11 +432,12 @@ int main(int argc, char **argv) {
                 SDL_FreeSurface(s);
             }
         }
-        SDL_RenderPresent(ren);
+        view_present(ren, (scene == SCENE_GAME && game) ? game_backdrop(game) : NULL);
     }
 
     if (game) game_destroy(game);
     ui_destroy(ui);
+    view_quit();
     text_quit();
     mixer_quit();
     assets_free(&as);

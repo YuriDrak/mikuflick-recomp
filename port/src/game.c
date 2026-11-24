@@ -75,6 +75,7 @@ struct Game {
     int nnotes, cap;
     int play_cnt;            /* MikuFlickCriManager GetPlayCnt */
     double t;
+    int evt_dcnt;            /* PlayCnt at the input event's own timestamp minus play_cnt */
 
     int counts[6];
     int combo, max_combo, stage_score, combo_score, interlude_cnt;
@@ -82,6 +83,7 @@ struct Game {
     float gauge;             /* DAT_00163088 */
     bool game_over, interlude_mode, paused, finished, quit, retry;
     int pause_focus;
+    char lyric[256];         /* PV mode: current lyric line (op 3 cue) */
     float board_alpha;
 
     Pointer ptr[MAX_POINTERS];
@@ -151,6 +153,8 @@ static void set_music_volume(Game *g) {
     /* NoteManager AddTensionGauge: main (vocal) volume = min(1, gauge/128 + 0.35) * BGM */
     float v = g->gauge * (1.0f / 128.0f) + 0.35f;
     if (v > 1.0f) v = 1.0f;
+    /* PV view: no tension; KARAOKE (GetPVModeFlg:4) sets the main/vocal volume to 0 */
+    if (g->opt->pv_mode) v = g->opt->pv_karaoke ? 0.0f : 1.0f;
     mixer_music_gain(v * g->opt->bgm_volume, g->opt->bgm_volume);
 }
 
@@ -228,6 +232,15 @@ static Note *last_crimax_note(Game *g) {
 static void fire_cue(Game *g, const char *p) {
     if (!p[0]) return;
     int op = p[0] - '0';
+    if (g->opt->pv_mode) {
+        /* ScenePVView: CuePointFunc_Lyrics (op 3) only acts in scene 4 with the LYRICS flag;
+           note cues (0/4/5/6) only act in the game scene. FadeOut (op 2) ends the section. */
+        if (op == 3 && g->opt->pv_lyrics) snprintf(g->lyric, sizeof g->lyric, "%s", p + 1);
+        else if (op == 2) g->lyric[0] = 0;
+        else if (op == 7) g->delay_ms = atoi(p + 1);
+        else if (op == 8) g->bpm = atoi(p + 1);
+        return;
+    }
     switch (op) {
     case 0: { /* Telop: s_tblTelopType[digit(diff+2)] -> Disable/Enable */
         int ch = kana_index(p + 1, NULL);
@@ -413,8 +426,18 @@ static int judge(Game *g, int board, int dir) {
 }
 
 /* NoteManager setTouchDown/setTouchUp broadcast */
-static void touch_down_all(Game *g) { for (int i = 0; i < g->nnotes; i++) g->notes[i].down = g->notes[i].cnt; }
-static void touch_up_all(Game *g) { for (int i = 0; i < g->nnotes; i++) g->notes[i].up = g->notes[i].cnt; }
+static void touch_down_all(Game *g) { for (int i = 0; i < g->nnotes; i++) g->notes[i].down = g->notes[i].cnt + g->evt_dcnt; }
+static void touch_up_all(Game *g) { for (int i = 0; i < g->nnotes; i++) g->notes[i].up = g->notes[i].cnt + g->evt_dcnt; }
+
+/* Inputs are judged at the moment they happened rather than at the last game_update
+   (notes' cnt is refreshed once per frame; events arrive in between). */
+static void stamp_event(Game *g, const SDL_Event *e) {
+    double t = mixer_music_time();
+    Uint32 now = SDL_GetTicks(), ts = e->common.timestamp;
+    if (ts && now >= ts && now - ts < 200) t -= (now - ts) / 1000.0;
+    int d = (int)ceil(t * 30.0) - g->play_cnt;
+    g->evt_dcnt = d < -2 ? -2 : d > 2 ? 2 : d;
+}
 
 /* ---------------------------------------------------------------- exec */
 
@@ -496,7 +519,7 @@ static void autoplay_input(Game *g) {
             e.type = SDL_KEYUP; e.key.keysym.sym = keys[key];
             game_event(g, &e);
         } else {
-            float x = (float)g->gd->board[n->board].px, y = (float)g->gd->board[n->board].py;
+            float x = g->gd->board[n->board].px + KEY_W / 2.0f, y = g->gd->board[n->board].py + KEY_H / 2.0f;
             memset(&e, 0, sizeof e);
             e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = (int)x; e.button.y = (int)y;
             game_event(g, &e);
@@ -513,13 +536,16 @@ static void autoplay_input(Game *g) {
 }
 
 static int key_at(Game *g, float x, float y) {
+    /* e_FlickBoardPictTbl positions are TOP-LEFT corners (UIKit rect origins), as the
+       board is drawn: あ covers x 129..256, y 530..638 and the board spans 129..510 x 530..962. */
     if (g->interlude_mode) {
-        /* TouchFlickBoard setInterludeRect: the whole board is one panel */
-        return (x >= 65 && x <= 447 && y >= 476 && y <= 908) ? 0 : -1;
+        /* TouchFlickBoard setInterludeRect: the whole board is one panel
+           (flickguide_int_* is drawn at (114,530), 409x350; わ's row stays live too) */
+        return (x >= 114 && x < 523 && y >= 530 && y < 962) ? 0 : -1;
     }
     for (int k = 0; k < NUM_KEYS; k++) {
         const BoardKey *b = &g->gd->board[k];
-        if (fabsf(x - b->px) <= KEY_W / 2.0f && fabsf(y - b->py) <= KEY_H / 2.0f) return k;
+        if (x >= b->px && x < b->px + KEY_W && y >= b->py && y < b->py + KEY_H) return k;
     }
     return -1;
 }
@@ -606,8 +632,30 @@ static void pause_choose(Game *g, int i) {
     else { g->quit = true; g->finished = true; }
 }
 
+SDL_Texture *game_backdrop(const Game *g) { return g ? video_texture(g->video) : NULL; }
+
+void game_pause(Game *g) {
+    if (!g || !g->loaded || g->finished || g->paused || g->opt->pv_mode) return;
+    g->paused = true;
+    mixer_music_pause(true);
+}
+
 void game_event(Game *g, const SDL_Event *e) {
     if (!g->loaded || g->finished) return;
+    g->evt_dcnt = 0;
+    if (!g->paused && !g->opt->pv_mode &&
+        (e->type == SDL_KEYDOWN || e->type == SDL_KEYUP || e->type == SDL_MOUSEBUTTONDOWN || e->type == SDL_MOUSEBUTTONUP ||
+         e->type == SDL_MOUSEMOTION || e->type == SDL_FINGERDOWN || e->type == SDL_FINGERUP || e->type == SDL_FINGERMOTION))
+        stamp_event(g, e);
+    if (g->opt->pv_mode) {   /* PV view: Esc / click returns to PV select, L/K toggle lyrics/karaoke */
+        if ((e->type == SDL_KEYDOWN && !e->key.repeat &&
+             (e->key.keysym.sym == SDLK_ESCAPE || e->key.keysym.sym == SDLK_BACKSPACE)) ||
+            (e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT)) {
+            g->quit = true;
+            g->finished = true;
+        }
+        return;
+    }
     if (e->type == SDL_KEYDOWN && !e->key.repeat) {
         SDL_Keycode k = e->key.keysym.sym;
         if (k == SDLK_ESCAPE || k == SDLK_p) {
@@ -662,12 +710,13 @@ void game_event(Game *g, const SDL_Event *e) {
         if (p) { p->x1 = (float)e->button.x; p->y1 = (float)e->button.y; release(g, p, flick_dir(p)); }
     } else if (e->type == SDL_FINGERDOWN || e->type == SDL_FINGERMOTION || e->type == SDL_FINGERUP) {
         int ww, wh;
-        SDL_Window *win = SDL_RenderGetWindow(g->ren);
-        SDL_GetWindowSize(win, &ww, &wh);
+        SDL_GetWindowSize(SDL_RenderGetWindow(g->ren), &ww, &wh);
         float lx, ly;
-        SDL_RenderWindowToLogical(g->ren, (int)(e->tfinger.x * ww), (int)(e->tfinger.y * wh), &lx, &ly);
-        if (e->type == SDL_FINGERDOWN) press(g, PTR_FINGER, e->tfinger.fingerId, lx, ly, key_at(g, lx, ly));
-        else {
+        view_window_to_logical(g->ren, e->tfinger.x * ww, e->tfinger.y * wh, &lx, &ly);
+        if (e->type == SDL_FINGERDOWN) {
+            if (lx > 570 && ly > 890) { game_pause(g); return; } /* pause button */
+            press(g, PTR_FINGER, e->tfinger.fingerId, lx, ly, key_at(g, lx, ly));
+        } else {
             Pointer *p = ptr_find(g, PTR_FINGER, e->tfinger.fingerId);
             if (!p) return;
             if (e->type == SDL_FINGERMOTION) move(g, p, lx, ly);
@@ -726,6 +775,7 @@ void game_destroy(Game *g) {
 bool game_update(Game *g) {
     if (g->finished) return false;
     if (g->paused) return true;
+    g->evt_dcnt = 0;          /* autoplay presses below happen "now" */
     g->t = mixer_music_time();
     /* CriManager::Exec fires the cue callbacks first (handlers see the previous PlayCnt) */
     while (g->next_cue < g->cues.n && (double)g->cues.cues[g->next_cue].time_ms <= g->t * 1000.0)
@@ -814,6 +864,13 @@ static void draw_combo(Game *g) {
     spr_tl(g->ren, &g->as->game1, "combonumber_11", x + 2, 517, 255);
 }
 
+/* KEYBOARD option: SystemTexture LoadBoardTex picks game_tex_02 / _fullroman / _romanhira */
+static const Atlas *key_atlas(Game *g) {
+    int k = g->opt->keyboard;
+    if (k >= 1 && k <= 2 && g->as->game2_kb[k - 1].tex) return &g->as->game2_kb[k - 1];
+    return &g->as->game2;
+}
+
 /* flick "flower" around a held key: RenderGuideUp/Down/Left/Right @0x6f228.. */
 static void draw_flower(Game *g, int key, int dir) {
     const BoardKey *b = &g->gd->board[key];
@@ -822,7 +879,7 @@ static void draw_flower(Game *g, int key, int dir) {
     static const float glyph[4][2] = {{36, -85}, {36, 136}, {-90, 26}, {160, 26}};
     static const int guide_slot[4] = {1, 3, 4, 2};  /* e_GuideCharPictIdx {centre,up,right,down,left} */
     static const int dir_of[4] = {1, 3, 4, 2};      /* flick code of each petal */
-    const Atlas *a2 = &g->as->game2;
+    const Atlas *a2 = key_atlas(g);
     for (int p = 0; p < 4; p++) {
         int gi = g->gd->guide[key][guide_slot[p]];
         if (gi < 0) continue;
@@ -847,6 +904,11 @@ void game_render(Game *g) {
         SDL_RenderCopyF(r, vt, NULL, &full);
     }
 
+    if (g->opt->pv_mode) {
+        /* ScenePVView: full-screen movie; NoteManager render_Lyrics draws the line at y=896 (shadow 898) */
+        if (g->lyric[0]) font_draw(r, g->lyric, 320, 880, 2.8f, (SDL_Color){255, 255, 255, 255}, 0);
+        return;
+    }
     const Atlas *g1 = &as->game1, *ef = &as->effect1;
     double tick = g->t * 30.0;  /* 30 Hz animation clock */
     Uint8 ui_a = (Uint8)(255 * g->board_alpha);
@@ -878,13 +940,14 @@ void game_render(Game *g) {
     spr_rot(r, g1, "insidewhirl", JUDGE_CX, LANE_CY, (float)fmod(tick * 3.0, 360.0), 1.0f, 200);
 
     /* tension: microphone stand at (4,572); lit stand clipped from the bottom by the gauge */
-    spr_tl(r, g1, "microphonemeter_00", 4, 572, 255);
+    float mic_x = g->opt->left_hand ? 490.0f : 4.0f;   /* HANDEDNESS: right-side gauge (x=490 set) */
+    spr_tl(r, g1, "microphonemeter_00", mic_x, 572, 255);
     {
         const Frame *f = atlas_find(g1, "microphonemeter_01");
         if (f) {
             int h = (int)(f->r.h * (g->gauge / 256.0f));
             SDL_Rect src = {f->r.x, f->r.y + f->r.h - h, f->r.w, h};
-            if (h > 0) spr_tl_rect(r, g1, &src, 4, 572 + (float)(f->r.h - h), (float)f->r.w, (float)h, 255);
+            if (h > 0) spr_tl_rect(r, g1, &src, mic_x, 572 + (float)(f->r.h - h), (float)f->r.w, (float)h, 255);
         }
     }
 
@@ -979,16 +1042,16 @@ void game_render(Game *g) {
             const BoardKey *b = &g->gd->board[k];
             char name[32];
             snprintf(name, sizeof name, "flickpanel_ori_%s_%02d", held_key == k ? "on" : "off", k);
-            spr_tl(r, &as->game2, name, (float)b->px, (float)b->py, ui_a);
+            spr_tl(r, key_atlas(g), name, (float)b->px, (float)b->py, ui_a);
         }
         /* NoteNormal render: guidecursor + direction panel on the key of the next target note */
-        if (next && held_key < 0) {
+        if (next && held_key < 0 && g->opt->guide_panel) {
             const BoardKey *b = &g->gd->board[next->board];
             bool near = next->cnt >= next->just - 11;
             spr_tl(r, g1, guide_frame(next->flick), (float)b->px, (float)b->py, near ? 255 : 170);
             spr_tl(r, g1, "guidecursor", (float)b->px, (float)b->py, 255);
         }
-        if (held_key >= 0) draw_flower(g, held_key, held_dir);
+        if (held_key >= 0 && g->opt->flower) draw_flower(g, held_key, held_dir);
     }
 
     spr_tl(r, g1, "pausebutton", 575, 899, 220);
@@ -1028,6 +1091,7 @@ void game_result(const Game *g, GameResult *o) {
     o->total_interlude = g->total_interlude;
     o->game_over = g->game_over;
     if (g->retry) { o->rank = -2; return; }   /* RETRY: restart the same song */
+    if (g->opt->pv_mode) { o->rank = g->quit ? -1 : -3; return; }   /* PV view: no result screen */
     if (g->quit) { o->rank = -1; return; }
     /* WindowResult loadTexture @0x4ba80 */
     float total = (float)(g->total_notes > 0 ? g->total_notes : 1);

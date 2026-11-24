@@ -29,6 +29,16 @@ work/
 #   Ghidra is ~1.1 GB. Install it here only when doing RE work; see README.
 # ---------------------------------------------------------------------------
 tools/third_party/
+#   Android SDK/NDK, Gradle, its caches and the SDL sources (~4 GB); fetched by
+#   `make -C android toolchain`.
+android/third_party/
+android/.gradle/
+android/app/.cxx/
+android/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
 
 # ---------------------------------------------------------------------------
 # Editor / OS noise

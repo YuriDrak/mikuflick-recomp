@@ -1,7 +1,7 @@
 /* PNG texture + cocos2d-style frame atlas (see docs/re_notes.md §3). */
 #include "mf.h"
 
-#include <SDL2/SDL_image.h>
+#include <SDL_image.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

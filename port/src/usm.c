@@ -182,3 +182,95 @@ void cuelist_free(CueList *c) {
     free(c->cues);
     memset(c, 0, sizeof *c);
 }
+
+/* ---------------- stream payloads (replaces the libavformat USM demuxer) ----------------
+ * Chunk header: sig[4] | u32be size | u8 ? | u8 payload_off | u16be padding | u8 chno | u8 ? | u8 ? | u8 data_type.
+ * The payload is [chunk+8+payload_off, chunk+8+size-padding); data_type 0 is stream data,
+ * 1 = header @UTF, 2 = "#HEADER END"/"#CONTENTS END" markers, 3 = metadata. */
+
+struct UsmStream {
+    FILE *f;
+    long off;
+    char sig[4];
+    int chno;
+    uint8_t *buf;
+    size_t cap;
+};
+
+UsmStream *usm_stream_open(const char *path, const char *sig, int chno) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { log_msg("cannot open %s", path); return NULL; }
+    UsmStream *s = calloc(1, sizeof *s);
+    if (!s) { fclose(f); return NULL; }
+    s->f = f;
+    memcpy(s->sig, sig, 4);
+    s->chno = chno;
+    return s;
+}
+
+const uint8_t *usm_stream_next(UsmStream *s, size_t *len, int *chno) {
+    uint8_t hdr[16];
+    while (s && fseek(s->f, s->off, SEEK_SET) == 0 && fread(hdr, 1, 16, s->f) == 16) {
+        uint32_t csize = be32(hdr + 4);
+        if (csize < 8) return NULL;
+        long here = s->off;
+        s->off += 8 + (long)csize;
+        uint32_t poff = hdr[9], pad = be16(hdr + 10);
+        int ch = hdr[12], dtype = hdr[15] & 3;
+        if (memcmp(hdr, s->sig, 4) || dtype != 0 || (s->chno >= 0 && ch != s->chno)) continue;
+        if (poff > csize || pad > csize - poff) continue;
+        size_t n = csize - poff - pad;
+        if (n > s->cap) {
+            uint8_t *nb = realloc(s->buf, n);
+            if (!nb) return NULL;
+            s->buf = nb;
+            s->cap = n;
+        }
+        if (fseek(s->f, here + 8 + (long)poff, SEEK_SET) != 0 || fread(s->buf, 1, n, s->f) != n) return NULL;
+        if (len) *len = n;
+        if (chno) *chno = ch;
+        return s->buf;
+    }
+    return NULL;
+}
+
+void usm_stream_close(UsmStream *s) {
+    if (!s) return;
+    fclose(s->f);
+    free(s->buf);
+    free(s);
+}
+
+bool usm_video_info(const char *path, double *fps_out, int *dcprec_out) {
+    *fps_out = 0;
+    *dcprec_out = 8;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    uint8_t hdr[16];
+    long off = 0;
+    double fps = 0;
+    while (fps == 0 && fseek(f, off, SEEK_SET) == 0 && fread(hdr, 1, 16, f) == 16) {
+        uint32_t csize = be32(hdr + 4);
+        if (csize < 8) break;
+        if (!memcmp(hdr, "@SFV", 4) && (hdr[15] & 3) == 0) break;   /* headers precede stream data */
+        if (!memcmp(hdr, "@SFV", 4) && (hdr[15] & 3) == 1) {
+            uint8_t *chunk = malloc(csize);
+            if (chunk && fseek(f, off + 8, SEEK_SET) == 0 && fread(chunk, 1, csize, f) == csize) {
+                uint32_t poff = chunk[1], pad = be16(chunk + 2);
+                Utf u;
+                if (poff < csize && pad <= csize - poff && utf_open(&u, chunk + poff, csize - poff - pad) &&
+                    !strcmp(u.name, "VIDEO_HDRINFO")) {
+                    uint64_t n = uint_of(&u, 0, ucol(&u, "framerate_n")), d = uint_of(&u, 0, ucol(&u, "framerate_d"));
+                    if (n && d) fps = (double)n / (double)d;
+                    uint64_t p = uint_of(&u, 0, ucol(&u, "mpeg_dcprec"));
+                    if (p >= 8 && p <= 11) *dcprec_out = (int)p;
+                }
+            }
+            free(chunk);
+        }
+        off += 8 + (long)csize;
+    }
+    fclose(f);
+    *fps_out = fps;
+    return fps > 0;
+}

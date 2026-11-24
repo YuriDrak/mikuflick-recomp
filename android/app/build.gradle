@@ -1,0 +1,59 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.github.yuridrak.mikuflick'
+    compileSdk 35
+    ndkVersion '27.2.12479018'
+
+    defaultConfig {
+        applicationId 'io.github.yuridrak.mikuflick'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '0.1'
+        externalNativeBuild {
+            cmake {
+                // 16 KB page alignment (required for Android 15+ devices)
+                // c++_static: SDL2's Android HID code is C++; 16 KB pages for Android 15+ devices
+                arguments '-DANDROID_STL=c++_static', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+            }
+        }
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Unsigned unless you add a signingConfig; see android/README.md
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'jni/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    sourceSets {
+        main {
+            // SDL's Java glue must match the SDL2 sources the native code is built from
+            java.srcDirs += ['../third_party/SDL2/android-project/app/src/main/java']
+            // the bundled OFL font (and its licence) as APK assets
+            assets.srcDirs = ['../../port/fonts']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+    }
+}
