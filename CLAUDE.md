@@ -26,12 +26,12 @@ _Last updated: 2026-11-24._
 
 *Miku Flick/02* (SEGA, iOS v1.1.5, armv7) native Linux and Android port: a clean-room **C11 + SDL2** reimplementation. It is not a binary translation; game rules were reconstructed from the reverse-engineered `MikuFlick2` binary and documented in `docs/re_notes.md`.
 
-The repository ships **no SEGA/Crypton game data**. A user-supplied, decrypted IPA is required. `make -C port setup IPA=…` extracts it to `extracted/ipa/` and writes `port/data/gamedata.txt`; both are gitignored.
+The repository ships **no SEGA/Crypton game data**. A user-supplied, decrypted IPA is required. `make -C port setup IPA=…` extracts it to `extracted/ipa/` and writes `port/data/gamedata.txt`; both are gitignored. Alternatively `./port/mikuflick --import-ipa FILE --import-to DIR` (the same importer the Android app uses) writes `DIR/MikuFlick2.app/` and `DIR/gamedata.txt` without `unzip`.
 
 ## Implemented
 
-- **Port** (`port/src`, ~4600 lines, excluding vendored pl_mpeg): `main`, `game`, `ui`, `media`, `mixer`, `usm`, `atlas`, `bplist`, `text`, `save`, `gamedata`, `assets`, `util`, `view` (screen composition), `pl_mpeg_impl` + `mf.h`. No FFmpeg: own USM payload reader, ADX and IMA4 decoders, MPEG-1 via vendored `port/third_party/pl_mpeg.h` (MIT, patched for the 11-bit intra DC precision of the Sofdec/TMPGEnc streams; see `MIKUFLICK PATCH`).
-- **Android** (`android/`): Gradle (AGP 8.7) + CMake build of the same sources with SDL2 2.30.10, SDL2_image 2.8.2, SDL2_ttf 2.22.0; `make -C android toolchain|sdk|apk|install|push|run|logcat`. SDK, NDK r27c, Gradle and caches live in gitignored `android/third_party/` (~3 GB). The project path contains a space: the stock `sdkmanager` script and `ndk-build` break on it, so the Makefile calls sdkmanager via `java` and the native build uses CMake. Game data is `adb push`ed to the app's external files dir (folders chmod 0775 so the app can enter them).
+- **Port** (`port/src`, ~5700 lines, excluding vendored pl_mpeg): `main`, `game`, `ui`, `media`, `mixer`, `usm`, `atlas`, `bplist`, `text`, `save`, `gamedata`, `assets`, `util`, `view` (screen composition), `ipa` (in-app IPA importer: zip + inflate), `mfx` (game tables from the binary, shared with `tools/mfextract`), `pl_mpeg_impl` + `mf.h`. No FFmpeg: own USM payload reader, ADX and IMA4 decoders, MPEG-1 via vendored `port/third_party/pl_mpeg.h` (MIT, patched for the 11-bit intra DC precision of the Sofdec/TMPGEnc streams; see `MIKUFLICK PATCH`).
+- **Android** (`android/`): Gradle (AGP 8.7) + CMake build of the same sources with SDL2 2.30.10, SDL2_image 2.8.2, SDL2_ttf 2.22.0; `make -C android toolchain|sdk|apk|install|push|run|logcat`. SDK, NDK r27c, Gradle and caches live in gitignored `android/third_party/` (~3 GB). The project path contains a space: the stock `sdkmanager` script and `ndk-build` break on it, so the Makefile calls sdkmanager via `java` and the native build uses CMake. On first start the app imports the user's own IPA (system file picker -> fd -> `ipa.c`) into its external files dir; `make -C android push` (adb, folders chmod 0775) remains as an alternative.
 - **Screens/features**: boot logos, title, music select (cover flow, artwork, stars, previews), full rhythm game (video, two ADX tracks, flick notes, interludes, judgement, scoring, combo/climax bonuses, tension gauge with vocal fade, game over, pause menu with RESUME/RETRY/MUSIC SELECT), result screen with ranks, OPTIONS (display, audio, handedness, keyboard, help, credits; saved), PV viewer (lyrics, KARAOKE, LOOP, SHUFFLE), persistent save.
 - **Screen**: `view.c` renders the 640×960 scene to a target shown centred; non-2:3 screens get a blurred video/menu backdrop in the bars (RGBA32 targets: SDL GLES2 swaps YUV colours on BGRA targets).
 - **Input**: mouse/multi-touch flick input, first finger mapped to the pointer for menus/pause/PV, Android Back = Esc, auto-pause on background, inputs judged at their event timestamp, keyboard mapping, input-timing calibration (`--offset`), fullscreen, volume controls.
@@ -50,6 +50,7 @@ The repository ships **no SEGA/Crypton game data**. A user-supplied, decrypted I
 - Android, real phone (A059P, arm64, Android 16): APK installs and runs; `magnet` Extreme `--autoplay` gives the identical 115,616 PERFECT result; video, menus via tap, Back key verified.
 - Touch areas: keys are hit-tested on their drawn rectangles (table positions are top-left corners; they were wrongly treated as centres, so touches landed one half-key low). Verified on the phone: a touch on the lower half of か selects か.
 - Played by hand on the phone by the user (2026-11-24) after the touch-area and screen-fill fixes.
+- In-app importer (`--import-ipa` on Linux, same code as Android): 175 files byte-identical to `unzip`, `gamedata.txt` identical to `mfextract`, ~7 s; bad/truncated files refused cleanly. Device test of the Android IMPORT IPA flow is pending (to be done by the user).
 
 **Not yet measured:** audio output latency across devices (PipeWire/Pulse; OpenSL ES on phones), long sessions, phones other than the A059P. Software-renderer timing is frame-rate sensitive.
 
@@ -59,9 +60,9 @@ Shop/DLC, Twitter, Game Center, ads/info feed, replays, collection and PV playli
 
 ## Repository / publication state
 
-- Git repo on branch `main`, tracking `origin` (`https://github.com/YuriDrak/mikuflick-linux-port.git`); the Android port, FFmpeg removal, touch-area and screen-fill work is committed and pushed.
+- Git repo on branch `main`, tracking `origin` (`https://github.com/YuriDrak/mikuflick-linux-port.git`); the Android port, FFmpeg removal, touch-area/screen-fill and in-app IPA importer work is committed and pushed.
 - Published to GitHub; keep local `main` and `origin/main` in sync.
-- Publishable set: 54 files (~2.3 MB) — `port/` (incl. vendored, patched `third_party/pl_mpeg.h`, MIT), `android/` (Gradle/CMake project, Makefile, checksums; no toolchain), `docs/`, `tools/` (own sources/scripts), a bundled OFL M+ font, `README.md`, `LICENSE` (MIT), `.gitignore`, and this `CLAUDE.md` (tracked intentionally).
+- Publishable set: 58 files (~2.3 MB) — `port/` (incl. vendored, patched `third_party/pl_mpeg.h`, MIT), `android/` (Gradle/CMake project, Makefile, checksums; no toolchain), `docs/`, `tools/` (own sources/scripts), a bundled OFL M+ font, `README.md`, `LICENSE` (MIT), `.gitignore`, and this `CLAUDE.md` (tracked intentionally).
 - `.gitignore` excludes: `*.ipa` (~924 MB), `extracted/` (~981 MB), `work/` (~132 MB RE artifacts), `tools/third_party/` (~1.1 GB Ghidra), `android/third_party/` (~3 GB SDK/NDK/Gradle/SDL sources), `*.apk`, keystores, all build output, and `port/data/gamedata.txt`.
 - `README.md` is the public entry point; `port/README.md` has the detailed build/controls notes, `android/README.md` the Android build.
 
@@ -79,11 +80,11 @@ Android (toolchain inside the project, see `android/README.md`):
 
 ```sh
 make -C android toolchain licenses sdk apk
-make -C android install push run
+make -C android install run       # then IMPORT IPA in the app (or: make -C android push)
 ```
 
 ## Next steps
 
 1. Measure audio latency on phones and add a tap-to-calibrate screen; test more phones/aspect ratios.
-2. Android extras: in-app IPA import (SAF + miniz + mfextract), release signing, GL context-loss texture reload.
+2. Android extras: release signing, GL context-loss texture reload; confirm the in-app import on more phones/file providers (it needs a seekable file descriptor).
 3. Optional cleanups: confirm the licence choice, add CI build, and consider a small curated, non-copyrighted subset of RE outputs if ever needed.

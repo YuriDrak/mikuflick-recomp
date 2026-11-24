@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 void game_set_highscore(Game *g, int hs);
 
@@ -74,41 +76,235 @@ static void map_mouse(SDL_Renderer *ren, SDL_Event *e) {
     }
 }
 
+
 #ifdef __ANDROID__
-/* Shown instead of exiting silently when the user's game data is missing. */
-static void error_screen(SDL_Renderer *ren, const char *title, const char *detail, const char *path) {
-    char lines[12][48];
-    int n = 0;
-    for (const char *p = path; *p && n < 12;) {   /* wrap the path after '/' */
-        int len = (int)strlen(p), cut = len;
-        if (len > 34) {
-            cut = 34;
-            while (cut > 8 && p[cut - 1] != '/') cut--;
-        }
-        snprintf(lines[n++], sizeof lines[0], "%.*s", cut, p);
-        p += cut;
+/* the game's main files are there (a quick check before loading everything) */
+static bool data_ready(const char *appdir) {
+    static const char *probe[] = {"game_tex_01.png", "UI_tex_01.png", "bg_tex_01.png"};
+    for (size_t i = 0; i < sizeof probe / sizeof *probe; i++) {
+        char p[1200];
+        snprintf(p, sizeof p, "%s/%s", appdir, probe[i]);
+        FILE *f = fopen(p, "rb");
+        if (!f) return false;
+        fclose(f);
     }
-    SDL_Color w = {255, 255, 255, 255}, c = {120, 230, 220, 255};
+    return true;
+}
+
+/* greedy word wrap into up to max lines of at most cols bytes (breaks after ' ' or '/') */
+static int wrap_text(const char *s, int cols, char out[][96], int max) {
+    int n = 0;
+    while (*s && n < max) {
+        while (*s == ' ') s++;
+        int len = (int)strlen(s), cut = len;
+        if (len > cols) {
+            cut = cols;
+            while (cut > cols / 3 && s[cut - 1] != ' ' && s[cut - 1] != '/') cut--;
+            if (cut <= cols / 3) cut = cols;
+            while (cut < len && ((unsigned char)s[cut] & 0xc0) == 0x80) cut++;   /* keep UTF-8 whole */
+        }
+        snprintf(out[n++], 96, "%.*s", cut, s);
+        s += cut;
+    }
+    return n;
+}
+
+#include <jni.h>
+
+/* MikuFlickActivity.pickIpa() opens the system file picker; takePickedFd() returns
+   -1 while it is open, -2 if cancelled, else a readable fd for the chosen file. */
+static bool jni_call_void(const char *name) {
+    JNIEnv *env = SDL_AndroidGetJNIEnv();
+    jobject act = SDL_AndroidGetActivity();
+    if (!env || !act) return false;
+    jclass cls = (*env)->GetObjectClass(env, act);
+    jmethodID m = (*env)->GetMethodID(env, cls, name, "()V");
+    bool ok = m != NULL;
+    if (ok) (*env)->CallVoidMethod(env, act, m);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); ok = false; }
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, act);
+    return ok;
+}
+
+static int jni_call_int(const char *name) {
+    JNIEnv *env = SDL_AndroidGetJNIEnv();
+    jobject act = SDL_AndroidGetActivity();
+    if (!env || !act) return -2;
+    jclass cls = (*env)->GetObjectClass(env, act);
+    jmethodID m = (*env)->GetMethodID(env, cls, name, "()I");
+    int r = m ? (*env)->CallIntMethod(env, act, m) : -2;
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); r = -2; }
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, act);
+    return r;
+}
+
+typedef struct {
+    SDL_mutex *mu;
+    double frac;
+    char file[96];
+    int state;          /* 0 running, 1 done, -1 failed */
+    char err[320];
+    int fd;
+    const char *dir;
+} ImportJob;
+
+static void import_progress(void *ud, double frac, const char *file) {
+    ImportJob *j = ud;
+    SDL_LockMutex(j->mu);
+    j->frac = frac;
+    snprintf(j->file, sizeof j->file, "%s", file ? file : "");
+    SDL_UnlockMutex(j->mu);
+}
+
+static int SDLCALL import_thread(void *ud) {
+    ImportJob *j = ud;
+    char err[320] = "";
+    bool ok = ipa_import(j->fd, j->dir, import_progress, j, err, sizeof err);
+    close(j->fd);
+    SDL_LockMutex(j->mu);
+    j->state = ok ? 1 : -1;
+    snprintf(j->err, sizeof j->err, "%s", err);
+    SDL_UnlockMutex(j->mu);
+    return 0;
+}
+
+typedef struct { float x, y, w, h; const char *label; } Button;
+
+static void draw_button(SDL_Renderer *ren, const Button *b, bool primary) {
+    SDL_FRect r = {b->x, b->y, b->w, b->h};
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    if (primary) SDL_SetRenderDrawColor(ren, 27, 181, 176, 255);
+    else SDL_SetRenderDrawColor(ren, 55, 60, 72, 255);
+    SDL_RenderFillRectF(ren, &r);
+    SDL_SetRenderDrawColor(ren, 255, 255, 255, 180);
+    SDL_RenderDrawRectF(ren, &r);
+    font_draw(ren, b->label, b->x + b->w / 2, b->y + b->h / 2 - 14, 2.6f, (SDL_Color){255, 255, 255, 255}, 0);
+}
+
+static bool hit(const Button *b, float x, float y) {
+    return x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h;
+}
+
+/* Shown while the user's game data is missing: imports their own IPA in the app.
+   Returns true once an import has succeeded, false if the player quits. */
+static bool import_screen(SDL_Renderer *ren, const char *files_dir) {
+    enum { PROMPT, PICKING, IMPORTING, FAILED } phase = PROMPT;
+    ImportJob job = {.mu = SDL_CreateMutex(), .dir = files_dir, .fd = -1};
+    SDL_Thread *th = NULL;
+    const Button import_btn = {120, 600, 400, 96, "IMPORT IPA"}, retry_btn = {120, 600, 400, 96, "TRY AGAIN"};
+    const Button quit_btn = {170, 730, 300, 80, "QUIT"};
+    SDL_Color white = {255, 255, 255, 255}, dim = {170, 180, 190, 255}, teal = {120, 230, 220, 255};
+    char lines[16][96], path_lines[6][96];
+    int npath = wrap_text(files_dir, 40, path_lines, 6);
+    char err_copy[320] = "";
+    bool result = false;
+
     for (;;) {
         SDL_Event e;
-        while (SDL_PollEvent(&e))
-            if (e.type == SDL_QUIT || e.type == SDL_FINGERUP || e.type == SDL_MOUSEBUTTONUP ||
-                (e.type == SDL_KEYDOWN && (e.key.keysym.sym == SDLK_AC_BACK || e.key.keysym.sym == SDLK_ESCAPE)))
-                return;
+        float tx = -1, ty = -1;
+        bool back = false;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT || e.type == SDL_APP_TERMINATING) goto done;
+            if (e.type == SDL_KEYDOWN && (e.key.keysym.sym == SDLK_AC_BACK || e.key.keysym.sym == SDLK_ESCAPE)) back = true;
+            map_mouse(ren, &e);
+            SDL_Event m;
+            if (finger_to_mouse(ren, &e, &m)) e = m;
+            if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
+                tx = (float)e.button.x;
+                ty = (float)e.button.y;
+            }
+        }
+
+        if (phase == PROMPT || phase == FAILED) {
+            if (back || hit(&quit_btn, tx, ty)) goto done;
+            if (hit(&import_btn, tx, ty)) {   /* same rectangle as TRY AGAIN */
+                if (jni_call_void("pickIpa")) phase = PICKING;
+                else { snprintf(err_copy, sizeof err_copy, "Could not open the file picker."); phase = FAILED; }
+            }
+        } else if (phase == PICKING) {
+            int fd = jni_call_int("takePickedFd");
+            if (fd == -2) phase = PROMPT;
+            else if (fd >= 0) {
+                job.fd = fd;
+                job.state = 0;
+                job.frac = 0;
+                job.file[0] = 0;
+                th = SDL_CreateThread(import_thread, "ipa-import", &job);
+                if (th) phase = IMPORTING;
+                else { close(fd); snprintf(err_copy, sizeof err_copy, "Could not start the import."); phase = FAILED; }
+            }
+        } else {
+            SDL_LockMutex(job.mu);
+            int st = job.state;
+            if (st < 0) snprintf(err_copy, sizeof err_copy, "%s", job.err);
+            SDL_UnlockMutex(job.mu);
+            if (st != 0) {
+                SDL_WaitThread(th, NULL);
+                th = NULL;
+                if (st > 0) { result = true; goto done; }
+                phase = FAILED;
+            }
+        }
+
         view_begin(ren);
-        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+        SDL_SetRenderDrawColor(ren, 12, 16, 24, 255);
         SDL_RenderClear(ren);
-        font_draw(ren, title, LOGICAL_W / 2, 220, 3.2f, w, 0);
-        font_draw(ren, detail, LOGICAL_W / 2, 320, 2.0f, w, 0);
-        font_draw(ren, "Copy MikuFlick2.app and gamedata.txt to:", LOGICAL_W / 2, 400, 2.0f, w, 0);
-        for (int i = 0; i < n; i++) font_draw(ren, lines[i], LOGICAL_W / 2, 460 + i * 34, 2.0f, c, 0);
-        font_draw(ren, "(make -C android push)", LOGICAL_W / 2, 480 + n * 34, 2.0f, w, 0);
-        font_draw(ren, "Tap to close", LOGICAL_W / 2, 820, 2.4f, w, 0);
+        font_draw(ren, "Miku Flick/02", LOGICAL_W / 2, 110, 4.0f, teal, 0);
+        if (phase == PROMPT || phase == PICKING) {
+            font_draw(ren, "Game data needed", LOGICAL_W / 2, 220, 3.2f, white, 0);
+            int n = wrap_text("This app contains no game data. Import your own decrypted Miku Flick/02 IPA "
+                              "(iOS v1.1.5) from this device; the app extracts what it needs (about 1 GB of "
+                              "free space). The IPA itself can be deleted afterwards.", 44, lines, 16);
+            for (int i = 0; i < n; i++) font_draw(ren, lines[i], LOGICAL_W / 2, 300 + i * 34, 2.0f, white, 0);
+            if (phase == PICKING) {
+                font_draw(ren, "Choose the IPA file...", LOGICAL_W / 2, 630, 2.6f, teal, 0);
+            } else {
+                draw_button(ren, &import_btn, true);
+                draw_button(ren, &quit_btn, false);
+            }
+            font_draw(ren, "Or copy MikuFlick2.app and gamedata.txt to:", LOGICAL_W / 2, 836, 1.6f, dim, 0);
+            for (int i = 0; i < npath; i++) font_draw(ren, path_lines[i], LOGICAL_W / 2, 866 + i * 26, 1.6f, dim, 0);
+        } else if (phase == IMPORTING) {
+            SDL_LockMutex(job.mu);
+            double frac = job.frac;
+            char file[96];
+            snprintf(file, sizeof file, "%s", job.file);
+            SDL_UnlockMutex(job.mu);
+            font_draw(ren, "Importing...", LOGICAL_W / 2, 300, 3.2f, white, 0);
+            SDL_FRect bar = {80, 460, 480, 36}, fill = {80, 460, (float)(480 * (frac < 0 ? 0 : frac > 1 ? 1 : frac)), 36};
+            SDL_SetRenderDrawColor(ren, 55, 60, 72, 255);
+            SDL_RenderFillRectF(ren, &bar);
+            SDL_SetRenderDrawColor(ren, 27, 181, 176, 255);
+            SDL_RenderFillRectF(ren, &fill);
+            char pct[16];
+            snprintf(pct, sizeof pct, "%d%%", (int)(frac * 100 + 0.5));
+            font_draw(ren, pct, LOGICAL_W / 2, 520, 2.6f, white, 0);
+            font_draw(ren, file, LOGICAL_W / 2, 580, 1.8f, dim, 0);
+            font_draw(ren, "Keep the app open. This takes a few minutes.", LOGICAL_W / 2, 700, 2.0f, white, 0);
+        } else {
+            font_draw(ren, "Import failed", LOGICAL_W / 2, 220, 3.2f, white, 0);
+            int n = wrap_text(err_copy, 44, lines, 9);
+            for (int i = 0; i < n; i++) font_draw(ren, lines[i], LOGICAL_W / 2, 300 + i * 34, 2.0f, white, 0);
+            draw_button(ren, &retry_btn, true);
+            draw_button(ren, &quit_btn, false);
+        }
         view_present(ren, NULL);
-        SDL_Delay(30);
+        SDL_Delay(16);
     }
+done:
+    if (th) SDL_DetachThread(th);   /* quitting mid-import: the next import starts from scratch */
+    else SDL_DestroyMutex(job.mu);
+    return result;
 }
 #endif
+
+static void cli_progress(void *ud, double frac, const char *file) {
+    (void)ud;
+    fprintf(stderr, "\r[%3d%%] %-48.48s", (int)(frac * 100 + 0.5), file ? file : "");
+    if (frac >= 1.0) fputc('\n', stderr);
+}
 
 static void usage(void) {
     puts("mikuflick - Linux port of Miku Flick/02 (requires your own extracted IPA)\n"
@@ -122,6 +318,7 @@ static void usage(void) {
          "  --autoplay         play perfectly by itself (testing)\n"
          "  --exit-after-song  print the result and exit after one song\n"
          "  --font PATH        TrueType font for menus (default: port/fonts/MPLUS1p-Bold.ttf; none = bitmap)\n"
+         "  --import-ipa FILE  extract your IPA into --import-to DIR (default imported/) and exit\n"
          "  --fullscreen       start fullscreen (F11 toggles)   --window WxH  window size");
 }
 
@@ -136,6 +333,7 @@ int main(int argc, char **argv) {
     bool exit_after = false, fullscreen = false;
     const char *shot_dir = NULL;      /* testing: PNG captures */
     const char *font_path = NULL;     /* --font PATH, or "none" for the bitmap font */
+    const char *import_ipa = NULL, *import_to = "imported";   /* --import-ipa: in-app importer from the CLI */
     double shot_times[16];
     int nshots = 0, next_shot = 0, start_scene = SCENE_BOOT, ui_shot_scene = -1;
     double ui_shot_times[32];
@@ -179,6 +377,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--fullscreen")) fullscreen = true;
         else if (!strcmp(a, "--shot-dir") && v) { shot_dir = v; i++; }
         else if (!strcmp(a, "--font") && v) { font_path = v; i++; }
+        else if (!strcmp(a, "--import-ipa") && v) { import_ipa = v; i++; }
+        else if (!strcmp(a, "--import-to") && v) { import_to = v; i++; }
         else if (!strcmp(a, "--shot-ui-times") && v) {
             for (char *s = (char *)v; *s && nuishots < 32;) {
                 ui_shot_times[nuishots++] = strtod(s, &s);
@@ -215,6 +415,17 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) { usage(); return 0; }
         else { fprintf(stderr, "unknown argument %s\n", a); usage(); return 1; }
     }
+    if (import_ipa) {   /* the same importer the Android app uses, for desktop setup and testing */
+        int fd = open(import_ipa, O_RDONLY);
+        if (fd < 0) { perror(import_ipa); return 1; }
+        char err[320];
+        bool ok = ipa_import(fd, import_to, cli_progress, NULL, err, sizeof err);
+        close(fd);
+        if (!ok) { fprintf(stderr, "\nimport failed: %s\n", err); return 1; }
+        printf("imported into %s - run with --app %s/MikuFlick2.app --gamedata %s/gamedata.txt\n", import_to, import_to,
+               import_to);
+        return 0;
+    }
     if (!datadir[0]) {
         const char *x = getenv("XDG_DATA_HOME"), *h = getenv("HOME");
         if (x && *x) snprintf(datadir, sizeof datadir, "%s/mikuflick-port", x);
@@ -243,10 +454,9 @@ int main(int argc, char **argv) {
     view_init(ren);   /* 640x960 scene, centred; bars filled (view.c) */
     text_init(font_path);
 #ifdef __ANDROID__
-    if (!gamedata_load(&gd, gamedata)) {
-        error_screen(ren, "Game data not found", "gamedata.txt is missing.", android_files);
-        return 1;
-    }
+    /* no data yet (first start): import the player's own IPA inside the app */
+    while (!(data_ready(appdir) && gamedata_load(&gd, gamedata)))
+        if (!import_screen(ren, android_files)) return 1;
     if (opt.start_song >= gd.nsongs) opt.start_song = -1;
 #endif
 
@@ -267,12 +477,14 @@ int main(int argc, char **argv) {
         }
     }
     static Assets as;
-    if (!assets_load(&as, ren, &gd, appdir)) {
+    while (!assets_load(&as, ren, &gd, appdir)) {
         log_msg("asset loading failed - is --app pointing at the extracted MikuFlick2.app?");
+        assets_free(&as);
 #ifdef __ANDROID__
-        error_screen(ren, "Game data not found", "MikuFlick2.app is missing or incomplete.", android_files);
-#endif
+        if (!import_screen(ren, android_files) || !gamedata_load(&gd, gamedata)) return 1;   /* incomplete data: re-import */
+#else
         return 1;
+#endif
     }
     static SaveData save;
     save_load(&save, datadir);

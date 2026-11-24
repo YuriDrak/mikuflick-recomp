@@ -2,8 +2,8 @@
 
 The Android app runs the same C11 + SDL2 code as the Linux port (`../port/src`),
 built with the NDK through CMake and wrapped in SDL's Java activity. Like the
-Linux build, it ships **no SEGA/Crypton data**: you copy the data from your own
-decrypted IPA onto the device.
+Linux build, it ships **no SEGA/Crypton data**: you import the game data from
+your own decrypted IPA on the device (or copy an existing extraction from a PC).
 
 ## Requirements
 
@@ -31,11 +31,25 @@ The debug APK contains `arm64-v8a`, `armeabi-v7a` and `x86_64` libraries
 
 ## Install and add your game data
 
+Install the APK (`make -C android install`, or copy it to the phone and open
+it). On first start the app shows **Game data needed**:
+
+1. Copy your own decrypted `com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa`
+   (v1.1.5) to the phone, e.g. into Downloads.
+2. Tap **IMPORT IPA** and pick it in the system file picker.
+3. The app checks the game version first (only v1.1.5 armv7 is accepted), then
+   extracts the files it uses (about 980 MB; it checks that there is enough
+   free space) and builds `gamedata.txt`. It takes a minute or two.
+
+Afterwards the IPA is no longer needed and can be deleted. The importer
+(`port/src/ipa.c`) only reads the file you pick and only writes to the app's
+own folder; a failed or interrupted import leaves no half-finished data behind.
+
+### Alternative: copy the data from a PC
+
 ```sh
 make -C port setup IPA=/path/to/your.ipa   # once, on the PC (as for Linux)
-make -C android install                    # adb install -r
 make -C android push                       # copies MikuFlick2.app (~980 MB) + gamedata.txt
-make -C android run
 ```
 
 `push` copies the files to the app's own storage folder,
@@ -76,8 +90,10 @@ The `args` extra accepts the Linux command-line flags.
 Debug APK on a real phone (arm64, Android 16, 1080×2392, gesture navigation):
 magnet Extreme with `--autoplay` gives the same result as on Linux (115,616,
 PERFECT, 172 COOL, 77/77 interludes); video, menus by touch, the Back button,
-the filled bars and the touch areas of the flick keys were checked. Not measured
-yet: audio latency on different phones.
+the filled bars and the touch areas of the flick keys were checked. The import
+path was verified on Linux against `unzip` + `mfextract` (identical output);
+the on-device **IMPORT IPA** flow still needs to be confirmed on real phones and
+file providers. Not measured yet: audio latency on different phones.
 
 ## Layout
 
@@ -87,12 +103,13 @@ yet: audio latency on different phones.
 | `SHA256SUMS` | checksums of the downloaded SDL source releases, command-line tools and Gradle |
 | `app/build.gradle` | AGP 8.7 app module: SDK levels, ABIs, CMake, SDL Java sources, font assets |
 | `app/jni/CMakeLists.txt` | builds SDL2, SDL2_image (stb PNG), SDL2_ttf (bundled FreeType) and `libmain.so` |
-| `app/src/main/java/.../MikuFlickActivity.java` | `SDLActivity` subclass: library list, intent arguments |
+| `app/src/main/java/.../MikuFlickActivity.java` | `SDLActivity` subclass: library list, intent arguments, system file picker for the IPA (fd passed to `port/src/ipa.c`) |
 | `app/src/main/AndroidManifest.xml` | portrait, fullscreen, no permissions |
 
 ## Not done yet
 
-- Importing an IPA inside the app (for now the data is copied with `adb push`).
+- Confirming the in-app import on more phones and file providers (it needs a
+  seekable file descriptor).
 - A tap-to-calibrate latency screen.
 - Release signing: `make -C android release` builds an unsigned APK. Sign it
   with your own key using `apksigner`.

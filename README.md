@@ -27,7 +27,7 @@ sudo apt install build-essential pkg-config \
   libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
 ```
 
-`unzip` is also required for the one-time setup step. The Android build has its own requirements (JDK 17+, about 4 GB of disk for the SDK/NDK it downloads into the project); see [`android/README.md`](android/README.md).
+`unzip` is used by the one-time `setup` step; the built-in importer (`--import-ipa`, or **IMPORT IPA** in the Android app) does not need it. The Android build has its own requirements (JDK 17+, about 4 GB of disk for the SDK/NDK it downloads into the project); see [`android/README.md`](android/README.md).
 
 ## Build and set up
 
@@ -42,7 +42,7 @@ make -C port setup IPA="/path/to/com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa"
 ./port/mikuflick
 ```
 
-`setup` unpacks the IPA into `extracted/ipa/` (about 1 GB, path-safety checked) and writes `port/data/gamedata.txt` from your `MikuFlick2` binary. `mfextract` verifies the binary UUID and refuses any other build.
+`setup` unpacks the IPA into `extracted/ipa/` (about 1 GB, path-safety checked) and writes `port/data/gamedata.txt` from your `MikuFlick2` binary. `mfextract` verifies the binary UUID and refuses any other build. Alternatively, `./port/mikuflick --import-ipa your.ipa --import-to DIR` runs the same importer the Android app uses (no `unzip` needed) and writes `DIR/MikuFlick2.app` and `DIR/gamedata.txt`; start the game with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
 
 If you already have an extracted app bundle, you can skip the IPA argument:
 
@@ -54,6 +54,7 @@ make -C port setup          # uses extracted/ipa/Payload/MikuFlick2.app
 
 ```text
 --app DIR            extracted MikuFlick2.app directory
+--gamedata FILE      tables exported by mfextract (default port/data/gamedata.txt)
 --data DIR           save directory (default ~/.local/share/mikuflick-port)
 --song N --diff D    jump straight into a song (diff 0 Easy … 3 Extreme, 4 Break the Limit)
 --offset N           input-timing calibration (same units as the original option)
@@ -63,7 +64,11 @@ make -C port setup          # uses extracted/ipa/Payload/MikuFlick2.app
 --font PATH          menu font (none = built-in bitmap font)
 --fullscreen         start fullscreen (F11 toggles)
 --window WxH         window size
+--import-ipa FILE    import your own IPA into --import-to DIR (default imported/) and exit
+--import-to DIR      destination for --import-ipa
 ```
+
+`--import-ipa` writes `DIR/MikuFlick2.app/` and `DIR/gamedata.txt`; start the game with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
 
 ## Controls
 
@@ -80,13 +85,13 @@ See [`port/README.md`](port/README.md) for the full control and UI description.
 
 ## Android
 
-The same sources build into an Android app (arm64-v8a, armeabi-v7a, x86_64; Android 7.0+). The `android/Makefile` downloads the SDK, NDK, Gradle and SDL sources into the project (gitignored), and the game data from your IPA is copied to the phone with `adb`:
+The same sources build into an Android app (arm64-v8a, armeabi-v7a, x86_64; Android 7.0+). The `android/Makefile` downloads the SDK, NDK, Gradle and SDL sources into the project (gitignored). On the phone, the app imports your own IPA itself: copy the `.ipa` to the phone, tap **IMPORT IPA** on the first start and pick it. No PC is needed for that step.
 
 ```sh
 make -C android toolchain        # downloads into android/third_party/
 make -C android licenses         # review and accept the Android SDK licences
 make -C android sdk apk          # NDK, CMake, platform 35 → app-debug.apk
-make -C android install push run # install, copy MikuFlick2.app + gamedata.txt, start
+make -C android install run      # install and start, then import your IPA in the app
 ```
 
 Details, controls and debugging: [`android/README.md`](android/README.md).
@@ -98,7 +103,7 @@ Details, controls and debugging: [`android/README.md`](android/README.md).
 | `port/` | The game: C sources shared by Linux and Android, Linux `Makefile`, bundled M+ font and the `pl_mpeg` (MIT) video decoder, detailed README. |
 | `android/` | Android build: Gradle/CMake project, `Makefile` that fetches the toolchain into `android/third_party/` (ignored), README. |
 | `docs/` | Reverse-engineering notes, the port design plan and the original IPA archive inventory. |
-| `tools/` | Self-contained C utilities and scripts used during analysis (`machoinfo`, `usmdump`, `bplist2json`, `mfextract`, Ghidra helpers, IPA extractor). |
+| `tools/` | Self-contained C utilities and scripts used during analysis (`machoinfo`, `usmdump`, `bplist2json`, `mfextract`, Ghidra helpers, IPA extractor). `mfextract` shares the table reader in `port/src/mfx.c`. |
 | `CLAUDE.md` | Agent operational rules and the current project status. |
 | `extracted/` | *Ignored.* Your extracted game bundle, created by `make setup`. |
 | `work/` | *Ignored.* Reverse-engineering scratch space: chart dumps, decompiled functions and Ghidra projects. |
@@ -132,7 +137,7 @@ The utilities in `tools/` are optional and are only needed if you want to redo t
 cc -O2 -Wall -o build/machoinfo tools/machoinfo/machoinfo.c -lm
 cc -O2 -Wall -o build/usmdump   tools/usmdump/usmdump.c
 cc -O2 -Wall -o build/bplist2json tools/bplist2json/bplist2json.c
-cc -O2 -Wall -o build/mfextract  tools/mfextract/mfextract.c
+cc -O2 -Wall -Iport/src -o build/mfextract tools/mfextract/mfextract.c port/src/mfx.c
 ```
 
 Ghidra is **not** vendored. To use `tools/ghidra_decompile.sh`, download Ghidra 11.2.1 and either place it at `tools/third_party/ghidra_11.2.1_PUBLIC` or set `GHIDRA_DIR`.

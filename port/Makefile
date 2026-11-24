@@ -24,9 +24,9 @@ build/%.o: src/%.c src/mf.h third_party/pl_mpeg.h | build
 build:
 	mkdir -p build
 
-../build/mfextract: ../tools/mfextract/mfextract.c
+../build/mfextract: ../tools/mfextract/mfextract.c src/mfx.c src/mfx.h
 	mkdir -p ../build
-	$(CC) -O2 -Wall -o $@ $<
+	$(CC) -O2 -Wall -Isrc -o $@ ../tools/mfextract/mfextract.c src/mfx.c
 
 setup: ../build/mfextract
 	@if [ -n "$(IPA)" ]; then cd .. && sh tools/extract_ipa.sh "$(IPA)"; \

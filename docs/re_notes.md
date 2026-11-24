@@ -10,6 +10,7 @@ Addresses are VM addresses in `MikuFlick2` (image base 0x4000 = file offset 0). 
 | `tools/machoinfo` (own C) | — | load commands, `-s` symbols with addresses, `-w` read words at VM address, `-x` hexdump |
 | `tools/usmdump` (own C) | — | CRI USM chunk walker, `@UTF` table dumper, `-c` cue-point TSV export |
 | `tools/bplist2json` (own C) | — | bplist00 → JSON (atlases, Localizable.strings, nibs, Info.plist) |
+| `tools/mfextract` (own C) | — | game tables from `MikuFlick2` → `gamedata.txt` (the same reader as `port/src/mfx.c`) |
 | Ghidra | 11.2.1 PUBLIC 20241105, sha256 `ce4db511…b1bc461c`, OpenJDK 21.0.13 | headless analysis and decompile (`tools/ghidra_decompile.sh`, `tools/ghidra_scripts/DecompileMatching.java`) |
 | ffmpeg/ffprobe | system | codec identification, later asset conversion |
 

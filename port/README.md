@@ -14,12 +14,14 @@ make -C port setup IPA="/path/to/com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa"
 ```
 `setup` unpacks the IPA into `extracted/ipa/` (with an archive path-safety check) and writes `port/data/gamedata.txt`, which holds the song list, kana→key tables, judgement/score tables and the sound list read out of *your* `MikuFlick2` binary. It refuses any other build of the binary.
 
+Without `unzip`, the game can import the IPA itself: `./port/mikuflick --import-ipa your.ipa --import-to DIR` (the same code as the Android app's IMPORT IPA button, `src/ipa.c`) writes only the files the game loads to `DIR/MikuFlick2.app` plus `DIR/gamedata.txt`, with CRC checks; run with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
+
 ## Run (from the project root)
 
 ```sh
 ./port/mikuflick
 ```
-Options: `--app DIR` (extracted `MikuFlick2.app`), `--data DIR` (save dir, default `~/.local/share/mikuflick-port`), `--song N --diff D` (jump straight into a song; diff 0 Easy … 3 Extreme, 4 Break the Limit), `--offset N` (input-timing calibration, same units as the original option), `--volume F`, `--se-volume F`, `--no-fail-sound`, `--font PATH` (menu font; `none` = built-in bitmap font), `--fullscreen`, `--window WxH`. F11 toggles fullscreen.
+Options: `--app DIR` (extracted `MikuFlick2.app`), `--gamedata FILE` (tables from `mfextract`; default `port/data/gamedata.txt`), `--data DIR` (save dir, default `~/.local/share/mikuflick-port`), `--song N --diff D` (jump straight into a song; diff 0 Easy … 3 Extreme, 4 Break the Limit), `--offset N` (input-timing calibration, same units as the original option), `--volume F`, `--se-volume F`, `--no-fail-sound`, `--font PATH` (menu font; `none` = built-in bitmap font), `--fullscreen`, `--window WxH`. F11 toggles fullscreen. `--import-ipa FILE [--import-to DIR]` imports your IPA in place of `setup` and exits (see above).
 
 ## Controls
 
@@ -52,4 +54,4 @@ Shop/DLC, Twitter, Game Center, ads, replays, the collection and PV playlist edi
 
 ## Testing aids
 
-`--autoplay` (perfect play through the game rules), `--autoplay-input` (perfect play through synthetic keyboard/mouse events), `--exit-after-song` (print a `RESULT …` line and exit), `--shot-dir DIR --shot-times 8,30` (save PNG frames), `--start-scene title|select|result|options|pv` (result shows a sample score), `--shot-ui-times 0.5,3` (PNG frames at seconds since start, any screen), `--script "9:enter,12:right"` (inject key presses: enter/esc/left/right/up/down/space). With `SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy` these run headless.
+`--autoplay` (perfect play through the game rules), `--autoplay-input` (perfect play through synthetic keyboard/mouse events), `--exit-after-song` (print a `RESULT …` line and exit), `--shot-dir DIR --shot-times 8,30` (save PNG frames), `--start-scene title|select|result|options|pv` (result shows a sample score), `--shot-ui-times 0.5,3` (PNG frames at seconds since start, any screen), `--script "9:enter,12:right"` (inject key presses: enter/esc/left/right/up/down/space). With `SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy` these run headless. The `--import-ipa` path is also used to test the Android importer on a desktop.

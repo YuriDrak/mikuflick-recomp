@@ -24,7 +24,9 @@ make -C port setup IPA="/path/com.sega.MikuFlick02-....ipa"
 ```
 At runtime the port reads `.usm`, `.adx`, `.caf`, `.png` and atlas `.plist` **directly from the extracted .app directory** (`--app DIR`, default `extracted/ipa/Payload/MikuFlick2.app`). Nothing is converted or duplicated.
 
-`mfextract` exports, by known VM address in the v1.1.5 binary (it checks the UUID `96B378F9-…` and refuses any other build):
+In-app alternative (Android, or `mikuflick --import-ipa FILE --import-to DIR`): `src/ipa.c` reads the IPA zip directly (own central-directory reader and inflater with CRC-32 checks), runs the same table export on the binary in memory, and extracts only the top-level `.png .plist .usm .adx .caf` files of the app. On the user's IPA it produces 175 files byte-identical to `unzip`'s and the same `gamedata.txt`, in about 7 s on a desktop.
+
+`mfextract` (whose logic now lives in `port/src/mfx.c`, shared with the importer) exports, by known VM address in the v1.1.5 binary (it checks the UUID `96B378F9-…` and refuses any other build):
 `_sTblDefaultMusicPackData` (song list), `e_FlickBoardTypeTbl` / `ResultTbl` / `SubTypeTbl` (kana→key/dir), `e_CharPictTbl` (kana→glyph tile), `e_FlickBoardPictTbl` (key tiles and positions), `s_tblNoteNormal_Front/Back`, `s_tblAddScore`, `s_tblTensionGauge`, `s_tblDifficultEndTimeOfs`, `_s_szSoundFile` / `_s_bSoundLoop`.
 
 ## 3. Module layout (`port/`)
@@ -35,6 +37,8 @@ At runtime the port reads `.usm`, `.adx`, `.caf`, `.png` and atlas `.plist` **di
 | `src/gamedata.c` | parse `gamedata.txt` |
 | `src/bplist.c` | bplist00 reader (atlases) |
 | `src/atlas.c` | PNG textures (SDL_image) + atlas frame lookup + sprite drawing |
+| `src/ipa.c` | in-app IPA importer: zip central directory, inflate + CRC-32, app-version check, selective extraction, progress callback |
+| `src/mfx.c` | game tables read from the user's `MikuFlick2` binary (shared by `tools/mfextract` and `ipa.c`) |
 | `src/usm.c` | USM chunk walker + `@UTF` reader → cue list |
 | `src/media.c` | own ADX + IMA4 decoders: whole-file audio decode to S16 stereo 44.1 kHz (per stream), streaming MPEG-1 video (pl_mpeg, `src/pl_mpeg_impl.c`) |
 | `src/mixer.c` | SDL audio callback: music (vocal + backing with separate gains), SFX voices, audio clock |
@@ -79,6 +83,7 @@ Headless checks (`SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy`, real-time au
 | magnet Hard, no input | game over when the gauge reaches 0: ⌈128 / ((128/260+0.01)·10)⌉ = 26 misses | game over after 26 WORST, rank E |
 | 恋は戦争 Break the Limit, no input | no penalties, no game over, r1 = 0 → rank D | rank 5 (D), game_over 0 |
 | `mfextract` tables | equal to the values read by hand in RE | equal |
+| in-app importer (`--import-ipa`, same code as Android) | output identical to `unzip` + `mfextract` | 175 files byte-identical, same `gamedata.txt`, about 7 s; malformed/truncated IPAs refused with a message and no leftover data |
 | magnet Extreme `--autoplay` and `--autoplay-input` after replacing FFmpeg with own ADX/IMA4 decoders and pl_mpeg (2026-11-24) | unchanged | both 115,616 PERFECT, 172 COOL, 77/77. Frames 0 and 600 match FFmpeg at PSNR 45.7 / 42.9 dB |
 | Android debug APK on a real phone (A059P, arm64, Android 16), magnet Extreme `--autoplay` | same as Linux | 115,616 PERFECT, 172 COOL, 77/77; video correct; tap and Back key navigate the menus |
 
@@ -95,7 +100,13 @@ make -C port setup IPA=…  # one-time asset extraction + table export
 ./port/mikuflick [--app DIR] [--data DIR]
 ```
 
-Android: see `android/README.md` (`make -C android toolchain licenses sdk apk install push run`).
+Without `unzip`, use the built-in importer instead of `setup`:
+```
+./port/mikuflick --import-ipa your.ipa --import-to imported
+./port/mikuflick --app imported/MikuFlick2.app --gamedata imported/gamedata.txt
+```
+
+Android: see `android/README.md` (`make -C android toolchain licenses sdk apk install run`; the game data is imported in the app).
 
 ## 9. Android port and FFmpeg removal (2026-11-24)
 
@@ -107,3 +118,4 @@ The Android build (`android/`, see `android/README.md`) compiles the same `port/
 * Android specifics in `main.c`: data paths from `SDL_AndroidGetExternalStoragePath()` / internal storage, an on-screen message when data is missing, the first finger turned into pointer events for menus (the board keeps raw multi-touch), Back → Esc, pause and save on `SDL_APP_WILLENTERBACKGROUND`. `game.c` judges an input at the song time of its event timestamp rather than at the last frame update.
 * Screen fill (`view.c`): scenes render into a 640×960 target that is shown centred. On tall phones the bars get a blurred, darkened copy of the video (two linear downscales to 40×60). The targets are RGBA32 because SDL 2.30's GLES2 renderer colour-swaps RGBA textures drawn into a BGRA (ARGB8888) target but not its YUV shader, which turned the movie R↔B. Mouse and touch coordinates are mapped back through the same rectangle.
 * Touch areas fix: the `e_FlickBoardPictTbl` positions are the keys' top-left corners. The port had hit-tested them as centres, so every touch registered half a key below and to the right of the drawn key (reported on a phone as "the input lands lower than where I touch"). Keys and the interlude panel now use the drawn rectangles.
+* In-app IPA import (`ipa.c`, `mfx.c`): Android has no `make setup`, so on first start the app shows an import screen. The system file picker (`MikuFlickActivity.pickIpa`) returns a file descriptor; the importer checks the game version on the binary before extracting about 980 MB (with a free-space check), writes into `MikuFlick2.app.import/` and swaps it in, writing `gamedata.txt` last. Verified on Linux against `unzip` + `mfextract` (identical output); bad inputs (not a zip, a zip without an iOS app, a truncated IPA) are refused with a message and leave nothing behind.

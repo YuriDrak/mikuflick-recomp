@@ -145,6 +145,13 @@ int mixer_sfx_play(const Pcm *p, float gain, bool loop);
 void mixer_sfx_stop(int voice);
 void mixer_sfx_stop_all(void);
 
+/* ---------------- ipa.c ---------------- */
+/* Import the user's own IPA (zip) open on fd: writes dir/MikuFlick2.app/ (the files the
+   game loads) and dir/gamedata.txt. Progress frac 0..1 and the current file go to cb
+   (called on the importing thread). On failure err holds a message for the player. */
+typedef void (*IpaProgress)(void *ud, double frac, const char *file);
+bool ipa_import(int fd, const char *dir, IpaProgress cb, void *ud, char *err, size_t errlen);
+
 /* ---------------- view.c ---------------- */
 /* Scenes draw into a 640x960 target between view_begin and view_present, which shows
    it centred and fills the bars of non-2:3 screens with a blurred backdrop (NULL = scene). */

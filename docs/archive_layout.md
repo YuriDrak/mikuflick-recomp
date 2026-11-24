@@ -2,6 +2,8 @@
 
 Status: **milestone 1 (extraction + inventory)**. Tags: **[V]** = verified with the evidence shown, **[H]** = hypothesis.
 
+> Later update (2026-11-24): the open items under “Next steps” were completed. The decoded formats and formulas are in `docs/re_notes.md`, and the port design/verification in `docs/linux_port_plan.md`. The atlases mentioned below as undecoded are documented in `re_notes.md` §3.
+
 ## How this was produced
 
 | Step | Command | Output |
@@ -87,7 +89,7 @@ All of them use `adpcm_ima_qt` (IMA4) at 44.1 kHz stereo, which ffmpeg decodes.
 * SE: `SE01`–`SE16` plus the variants `SE01_01`, `SE01_03`, `SE02_01`, `SE04_01`, `SE04v2`, `SE05_01`
 
 ### Textures: PNG + atlas plist [V]
-98 PNGs, mostly 1024×1024 RGBA (no PVRTC). The atlas descriptors are binary plists in a Zwoptex/cocos-style frame dictionary **[H]**, still to be decoded:
+98 PNGs, mostly 1024×1024 RGBA (no PVRTC). The atlas descriptors are binary plists in a Zwoptex/cocos-style frame dictionary (decoded in `docs/re_notes.md` §3):
 * UI: `UI_tex_01..09` (`.plist` for 01–07)
 * Gameplay: `game_tex_01/02` (+ `_fullroman`, `_romanhira` variants for romaji display modes), `game_effect_01..05`
 * Flick keyboards: `mf_hiragana_{blank,telop}{,_fullroman,_romanhira}`, `mf_katakana_{blank,telop}`
