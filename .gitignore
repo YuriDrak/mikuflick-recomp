@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# User-supplied game data (never publish)
+# ---------------------------------------------------------------------------
+*.ipa
+extracted/
+
+# ---------------------------------------------------------------------------
+# Generated / local build output
+# ---------------------------------------------------------------------------
+build/
+port/mikuflick
+port/data/gamedata.txt
+*.o
+*.a
+*.so
+*.d
+*.log
+
+# ---------------------------------------------------------------------------
+# Reverse-engineering scratch space
+#   work/ holds charts, decompiled functions, Ghidra projects and test logs.
+#   It is derived from the user's own copy of the game and is not needed to
+#   build or run the port.
+# ---------------------------------------------------------------------------
+work/
+
+# ---------------------------------------------------------------------------
+# Vendored / downloaded third-party toolchain
+#   Ghidra is ~1.1 GB. Install it here only when doing RE work; see README.
+# ---------------------------------------------------------------------------
+tools/third_party/
+
+# ---------------------------------------------------------------------------
+# Local agent configuration and editor / OS noise
+# ---------------------------------------------------------------------------
+CLAUDE.md
+.opencode/
+.cache/
+.DS_Store
+Thumbs.db
+*.swp
+*~
