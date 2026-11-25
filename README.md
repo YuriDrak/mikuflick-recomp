@@ -2,7 +2,7 @@
 
 A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for Linux and Android (see [`android/README.md`](android/README.md)). The rhythm-game rules — note timing, judgement windows, scoring, combo bonus, tension gauge and ranks — are reproduced from the reverse-engineered original, as documented in [`docs/`](docs/).
 
-> **This repository ships no game data.** It contains no SEGA/Crypton assets, music, video, artwork or charts. You need your own legally obtained, decrypted copy of `com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa` (v1.1.5, armv7). The port extracts the IPA locally and reads its tables, movies, audio and textures at runtime.
+> **This repository ships no game data.** It contains no SEGA/Crypton assets, music, video, artwork or charts. You need your own legally obtained, decrypted copy of `com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa` [ios3-6-ipas](https://archive.org/download/ios3-6-ipas) (v1.1.5, armv7). The port extracts the IPA locally and reads its tables, movies, audio and textures at runtime.
 
 ## Features
 
