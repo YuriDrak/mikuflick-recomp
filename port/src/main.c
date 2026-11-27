@@ -195,6 +195,17 @@ static bool data_ready(const char *appdir) {
     return true;
 }
 
+/* an import made by an older version has no help text (Localizable.strings) or ending credits:
+   both need the IPA again, as the game binary isn't kept */
+static bool data_current(const char *appdir, const GameData *gd) {
+    char p[1200];
+    snprintf(p, sizeof p, "%s/en.lproj/Localizable.strings", appdir);
+    FILE *f = fopen(p, "rb");
+    if (!f) return false;
+    fclose(f);
+    return gd->nending > 0;
+}
+
 /* greedy word wrap into up to max lines of at most cols bytes (breaks after ' ' or '/') */
 static int wrap_text(const char *s, int cols, char out[][96], int max) {
     int n = 0;
@@ -293,12 +304,13 @@ static bool hit(const Button *b, float x, float y) {
 
 /* Shown while the user's game data is missing: imports their own IPA in the app.
    Returns true once an import has succeeded, false if the player quits. */
-static bool import_screen(SDL_Renderer *ren, const char *files_dir) {
+/* update: the data is there but outdated (data_current); NOT NOW keeps it and returns false */
+static bool import_screen(SDL_Renderer *ren, const char *files_dir, bool update) {
     enum { PROMPT, PICKING, IMPORTING, FAILED } phase = PROMPT;
     ImportJob job = {.mu = SDL_CreateMutex(), .dir = files_dir, .fd = -1};
     SDL_Thread *th = NULL;
     const Button import_btn = {120, 600, 400, 96, "IMPORT IPA"}, retry_btn = {120, 600, 400, 96, "TRY AGAIN"};
-    const Button quit_btn = {170, 730, 300, 80, "QUIT"};
+    const Button quit_btn = {170, 730, 300, 80, update ? "NOT NOW" : "QUIT"};
     SDL_Color white = {255, 255, 255, 255}, dim = {170, 180, 190, 255}, teal = {120, 230, 220, 255};
     char lines[16][96], path_lines[6][96];
     int npath = wrap_text(files_dir, 40, path_lines, 6);
@@ -357,10 +369,12 @@ static bool import_screen(SDL_Renderer *ren, const char *files_dir) {
         SDL_RenderClear(ren);
         font_draw(ren, "Miku Flick/02", LOGICAL_W / 2, 110, 4.0f, teal, 0);
         if (phase == PROMPT || phase == PICKING) {
-            font_draw(ren, "Game data needed", LOGICAL_W / 2, 220, 3.2f, white, 0);
-            int n = wrap_text("This app contains no game data. Import your own decrypted Miku Flick/02 IPA "
-                              "(iOS v1.1.5) from this device; the app extracts what it needs (about 1 GB of "
-                              "free space). The IPA itself can be deleted afterwards.", 44, lines, 16);
+            font_draw(ren, update ? "Game data update" : "Game data needed", LOGICAL_W / 2, 220, 3.2f, white, 0);
+            int n = wrap_text(update ? "This version also reads the help text and the ending credits from your IPA. "
+                                       "Import it once more to add them; your scores and options are kept."
+                                     : "This app contains no game data. Import your own decrypted Miku Flick/02 IPA "
+                                       "(iOS v1.1.5) from this device; the app extracts what it needs (about 1 GB of "
+                                       "free space). The IPA itself can be deleted afterwards.", 44, lines, 16);
             for (int i = 0; i < n; i++) font_draw(ren, lines[i], LOGICAL_W / 2, 300 + i * 34, 2.0f, white, 0);
             if (phase == PICKING) {
                 font_draw(ren, "Choose the IPA file...", LOGICAL_W / 2, 630, 2.6f, teal, 0);
@@ -577,7 +591,8 @@ int main(int argc, char **argv) {
 #ifdef __ANDROID__
     /* no data yet (first start): import the player's own IPA inside the app */
     while (!(data_ready(appdir) && gamedata_load(&gd, gamedata)))
-        if (!import_screen(ren, android_files)) return 1;
+        if (!import_screen(ren, android_files, false)) return 1;
+    if (!data_current(appdir, &gd) && import_screen(ren, android_files, true) && !gamedata_load(&gd, gamedata)) return 1;
     if (opt.start_song >= gd.nsongs) opt.start_song = -1;
 #endif
 
@@ -603,7 +618,7 @@ int main(int argc, char **argv) {
         log_msg("asset loading failed - is --app pointing at the extracted MikuFlick2.app?");
         assets_free(&as);
 #ifdef __ANDROID__
-        if (!import_screen(ren, android_files) || !gamedata_load(&gd, gamedata)) return 1;   /* incomplete data: re-import */
+        if (!import_screen(ren, android_files, false) || !gamedata_load(&gd, gamedata)) return 1;   /* incomplete data: re-import */
 #else
         return 1;
 #endif
