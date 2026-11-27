@@ -22,6 +22,7 @@
 #define MAX_FX 32
 #define KEY_W 127
 #define KEY_H 108
+#define MIN_PRESS_MS 100   /* port: 3 ticks at 30 Hz, see Game.key_down_ms */
 
 enum { NOTE_NORMAL = 0, NOTE_INTERLUDE = 1 };
 enum { PTR_MOUSE = 0, PTR_KEYBOARD = 1, PTR_FINGER = 2 };
@@ -54,14 +55,20 @@ typedef struct {
 } Pointer;
 
 /* effects, timed in 30 Hz ticks like the original EffectManager (EAGLView frame interval 2) */
-enum { FX_NONE, FX_RESULT, FX_PULSE, FX_INTERLUDE, FX_SPSCORE };
+enum { FX_NONE, FX_RESULT, FX_PULSE, FX_INTERLUDE };
 typedef struct { int kind; double t0; int v; } Fx;
+
+/* SoundManager Play: indices used by the game scene's buttons (same table as SND_*) */
+enum {
+    SE_BACK = 8,     /* -[TouchBack touchUp:] @0x6ee72 (pause menu RESUME) */
+    SE_BUTTON = 19,  /* -[TouchPause touchUp:] @0x729c2, -[TouchRetry touchUp:] @0x6a418 (RETRY, MUSIC SELECT) */
+};
 
 struct Game {
     SDL_Renderer *ren;
     Assets *as;
     const GameData *gd;
-    const Options *opt;
+    Options *opt;            /* writable: the pause menu INPUT TIMING bar stores input_timing */
     int song, diff;
 
     CueList cues;
@@ -80,11 +87,47 @@ struct Game {
     int counts[6];
     int combo, max_combo, stage_score, combo_score, interlude_cnt;
     int total_notes, total_interlude;
-    float gauge;             /* DAT_00163088 */
+    int flick_total[NUM_KEYS][NUM_FLICK_DIRS], flick_success[NUM_KEYS][NUM_FLICK_DIRS];   /* GameResult */
+    float gauge;            /* DAT_00163088 */
     bool game_over, interlude_mode, paused, finished, quit, retry;
     int pause_focus;
+    int pause_press;         /* pause button held by the pointer, -1 none */
+    /* port: a quick click keeps the held look until 100 ms after the press (as ui.c ui_event, pvview.c) */
+    int pause_lg;
+    Uint32 pause_dn_ms, pause_lg_until;
+    bool pause_kbd;          /* keyboard focus shown (the original is touch-only) */
+    bool timing_drag;        /* pause menu INPUT TIMING bar being dragged */
+    float timing_x;          /* pointer x at the last timing step */
     char lyric[256];         /* PV mode: current lyric line (op 3 cue) */
-    float board_alpha;
+
+    /* WindowManager exec @0x3e21c: UI fades, one step per 30 Hz tick, skipped while paused
+       (driven by PlayCnt here, which stops while paused) */
+    int ui_tick;             /* PlayCnt the fades have been stepped to */
+    float ui_alpha, ui_rate; /* SetUIFade: keys, charactercircle, whirls, tension meter */
+    float int_alpha, int_rate; /* SetInterludeUIFade: flickguide_int, charactercircle_int */
+    int int_hold;            /* EndInterludeMode: ticks before the interlude panel fades out */
+    bool int_panel;          /* TouchFlickBoard setInterludeMode (panel drawn); interlude_mode is the touch rect */
+
+    /* WindowGameWindow exec @0x39b3c: every frame, also while paused (wall clock, 30 Hz) */
+    Uint32 clock_last;
+    double clock_ms;
+    float fade;              /* m_Fade: full-screen black, 1 -> 0 at -0.03 per tick */
+    int rail_pos;            /* rail_01 scroll, +32 px per tick mod 640 */
+    int rot_a, rot_b, rot_star; /* m_ComboRot (+12), m_ComboRot2 (+13), m_ComboStarRot (+17) */
+    bool sp_on;              /* StartSpScoreEffect: bonus score popup */
+    int sp_cnt, sp_score;
+    float sp_y, sp_alpha;
+
+    /* TouchPause: held by a pointer (opens on release over the button) */
+    bool pbtn_down;
+    int pbtn_kind;
+    SDL_FingerID pbtn_fid;
+    Uint32 pbtn_ms;          /* port: wall time of its last touch-down (minimum visible press) */
+    /* port: a mouse click / trackpad tap can deliver down and up inside one frame, so the original's
+       pressed look (set on touchDown, drawn by the next Render) would never reach the screen: each key
+       keeps its last press time and release direction and stays lit for at least MIN_PRESS_MS */
+    Uint32 key_down_ms[NUM_KEYS];
+    int key_up_dir[NUM_KEYS];
 
     Pointer ptr[MAX_POINTERS];
     Fx fx[MAX_FX];
@@ -140,11 +183,130 @@ static int digit_at(const char *s, int pos) {
     return -1;
 }
 
+/* the pause buttons' face pulse and press scaling (same as the menu buttons in ui.c) */
+static Uint8 pause_pulse(unsigned counter) {
+    int i = (int)(counter % 22);
+    if (i > 10) i = 21 - i;
+    return (Uint8)(255.0f * 0.85f * powf(0.98f, (float)i) + 0.5f);
+}
+
+static void pause_scale(float s, float *x, float *y, float *w, float *h) {
+    *x -= *w * (s - 1) * 0.5f; *y -= *h * (s - 1) * 0.5f; *w *= s; *h *= s;
+}
+
+static void enter_pause(Game *g, bool on) {
+    g->paused = on;
+    g->pause_press = -1;
+    g->pause_lg_until = 0;
+    g->pause_kbd = false;
+    g->timing_drag = false;
+    g->pbtn_down = false;
+    mixer_music_pause(on);
+}
+
 /* ---------------------------------------------------------------- effects */
 
 static void fx_add(Game *g, int kind, int v) {
     g->fx[g->fx_next] = (Fx){kind, g->t, v};
     g->fx_next = (g->fx_next + 1) % MAX_FX;
+}
+
+/* m_StretchRate of EffectFlickResult exec @0x2ea26 and EffectInterlude exec @0x62cd4 after tick n
+   (m_TimeCnt): while n < timer - 5 and n <= 17, bit n of 0x3c3c subtracts 0.38 and bit n of 0x3c3c0
+   adds 0.38 (cumulative, so it swings 1 -> -0.52 -> 1 -> -0.52 -> 1: a horizontal flip-spin);
+   any other tick resets it to 1. */
+static float wobble_stretch(int n, int timer) {
+    float s = 1.0f;
+    for (int i = 1; i <= n; i++) {
+        unsigned bit = i < 32 ? 1u << i : 0;
+        if (i < timer - 5 && i <= 17 && (bit & 0x3c3cu)) s -= 0.38f;
+        else if (i < timer - 5 && i <= 17 && (bit & 0x3c3c0u)) s += 0.38f;
+        else s = 1.0f;
+    }
+    return s;
+}
+
+/* -[WindowManager SetUIFade:] / SetInterludeUIFade: on = +0.06, off = -0.02 per tick */
+static void set_ui_fade(Game *g, bool on) { g->ui_rate = on ? 0.06f : -0.02f; }
+static void set_int_fade(Game *g, bool on) { g->int_rate = on ? 0.06f : -0.02f; }
+
+/* -[WindowManager StartInterludeMode] */
+static void start_interlude_mode(Game *g) {
+    if (g->interlude_mode) return;
+    g->int_hold = 0;
+    set_int_fade(g, true);
+    set_ui_fade(g, false);
+    g->interlude_mode = true;    /* TouchFlickBoard setInterludeMode:1 + setInterludeRect */
+    if (getenv("MF_DEBUG")) log_msg("interlude start t=%.3f", g->t);
+    g->int_panel = true;
+}
+
+/* -[WindowManager EndInterludeMode]: hold the panel for delay_ms/30 ticks, then fade it out;
+   the touch rect goes back to the ten keys at once */
+static void end_interlude_mode(Game *g) {
+    g->int_hold = g->delay_ms / 30;
+    set_int_fade(g, false);
+    g->interlude_mode = false;
+    if (getenv("MF_DEBUG")) log_msg("interlude end t=%.3f", g->t);
+}
+
+/* WindowManager exec @0x3e21c, UI part (one 30 Hz tick) */
+static void ui_step(Game *g) {
+    if (g->ui_rate != 0.0f) {
+        g->ui_alpha += g->ui_rate;
+        if (g->ui_alpha > 1.0f) { g->ui_alpha = 1.0f; g->ui_rate = 0.0f; }
+        else if (g->ui_alpha < 0.0f) { g->ui_alpha = 0.0f; g->ui_rate = 0.0f; }
+    }
+    if (g->int_hold >= 1) { g->int_hold--; return; }
+    if (g->int_rate != 0.0f) {
+        g->int_alpha += g->int_rate;
+        if (g->int_alpha > 1.0f) { g->int_alpha = 1.0f; g->int_rate = 0.0f; }
+        else if (g->int_alpha < 0.0f) {
+            g->int_alpha = 0.0f;
+            g->int_rate = 0.0f;
+            g->int_panel = false;                          /* setInterludeMode:0 */
+            if (g->next_cue < g->cues.n - 10) set_ui_fade(g, true); /* keys back unless in the last 10 cues */
+        }
+    }
+}
+
+/* -[WindowGameWindow StartSpScoreEffect:] */
+static void sp_start(Game *g, int score) {
+    g->sp_on = true;
+    g->sp_cnt = 0;
+    g->sp_score = score;
+    g->sp_y = 75.0f;
+    g->sp_alpha = 1.0f;
+}
+
+/* WindowGameWindow exec @0x39b3c (one 30 Hz tick; runs while paused too) */
+static void window_step(Game *g) {
+    /* the fade-in starts with the first movie frame */
+    if (g->fade > 0.0f && (!g->video || video_texture(g->video))) {
+        g->fade -= 0.03f;
+        if (g->fade < 0.0f) g->fade = 0.0f;
+    }
+    g->rail_pos = (g->rail_pos + 32) % 640;
+    g->rot_a = (g->rot_a + 12) % 360;
+    g->rot_b = (g->rot_b + 13) % 360;
+    g->rot_star = (g->rot_star + 17) % 360;
+    if (g->sp_on) {
+        g->sp_cnt++;
+        float y = 75.0f - 25.0f * sinf((float)g->sp_cnt / 42.0f * 1.57f);
+        g->sp_y = y < 50.0f ? 50.0f : y;
+        if (g->sp_cnt >= 43) g->sp_on = false;
+        else if (g->sp_cnt >= 28) { g->sp_alpha -= 1.0f / 15.0f; if (g->sp_alpha < 0.0f) g->sp_alpha = 0.0f; }
+    }
+}
+
+/* port: the original steps once per 30 fps frame; here whole 30 Hz ticks of wall time */
+static int clock_steps(Game *g) {
+    Uint32 now = SDL_GetTicks();
+    g->clock_ms += (double)(Uint32)(now - g->clock_last);
+    g->clock_last = now;
+    int n = (int)(g->clock_ms / (1000.0 / 30.0));
+    g->clock_ms -= n * (1000.0 / 30.0);
+    return n > 8 ? 8 : n;
 }
 
 /* ---------------------------------------------------------------- status */
@@ -249,8 +411,8 @@ static void fire_cue(Game *g, const char *p) {
         add_note(g, NOTE_NORMAL, ch, d != 0);
         break;
     }
-    case 1: g->board_alpha = 1.0f; break;  /* FadeIn: WindowManager SetUIFade:1 */
-    case 2: break;                          /* FadeOut */
+    case 1: set_ui_fade(g, true); break;    /* FadeIn: WindowManager SetUIFade:1 */
+    case 2: set_ui_fade(g, false); break;   /* FadeOut: WindowManager SetUIFade:0 */
     case 3: break;                          /* Lyrics: only shown in PV mode (scene 4) */
     case 4: { /* SmallTelop: disabled note carrying the small kana */
         int ch = kana_index(p + 1, NULL);
@@ -262,10 +424,10 @@ static void fire_cue(Game *g, const char *p) {
     case 5: { /* Interlude: s_tblInterludeType[digit(diff+1)] */
         int d = digit_at(p, g->diff + 1);
         if (d == 1) {
-            g->interlude_mode = true;       /* WindowManager StartInterludeMode */
+            start_interlude_mode(g);        /* WindowManager StartInterludeMode */
             add_note(g, NOTE_INTERLUDE, 0, true);
         } else if (d == 2) {
-            g->interlude_mode = false;      /* EndInterludeMode */
+            end_interlude_mode(g);          /* EndInterludeMode */
         }
         break;
     }
@@ -284,6 +446,20 @@ static void fire_cue(Game *g, const char *p) {
 }
 
 /* MikuFlickCriManager CheckTotalNoteNum: playable notes / interlude notes for this difficulty */
+/* the same pass's per-key x direction totals (e_FlickBoardTypeTbl / e_FlickBoardResultTbl of the
+   note's kana -> MusicData AddFlickResultNum); successes are counted in check_normal */
+static void count_flick_totals(Game *g) {
+    memset(g->flick_total, 0, sizeof g->flick_total);
+    memset(g->flick_success, 0, sizeof g->flick_success);
+    for (int i = 0; i < g->cues.n; i++) {
+        const char *p = g->cues.cues[i].param;
+        int ch = p[0] == '0' && digit_at(p, g->diff + 2) > 0 ? kana_index(p + 1, NULL) : -1;
+        if (ch < 0) continue;
+        int k = g->gd->kana[ch].key, d = g->gd->kana[ch].dir;
+        if (k >= 0 && k < NUM_KEYS && d >= 0 && d < NUM_FLICK_DIRS) g->flick_total[k][d]++;
+    }
+}
+
 static void count_totals(Game *g) {
     g->total_notes = g->total_interlude = 0;
     for (int i = 0; i < g->cues.n; i++) {
@@ -291,6 +467,7 @@ static void count_totals(Game *g) {
         if (p[0] == '0' && digit_at(p, g->diff + 2) > 0) g->total_notes++;
         if (p[0] == '5' && digit_at(p, g->diff + 1) == 1) g->total_interlude++;
     }
+    count_flick_totals(g);
 }
 
 /* ---------------------------------------------------------------- judgement */
@@ -330,10 +507,10 @@ static int check_interlude(Game *g, Note *n) {
         g->stage_score += 1;
         if (g->interlude_cnt >= g->total_interlude) {
             g->stage_score += 39;
-            play(g, SND_HIT);
-            fx_add(g, FX_SPSCORE, 39);
+            play(g, SND_HIT);            /* SoundManager Play:1 @0x30216 */
+            sp_start(g, 39);             /* StartSpScoreEffect:39 @0x30248 */
         }
-        fx_add(g, FX_INTERLUDE, 0);
+        fx_add(g, FX_INTERLUDE, 0);      /* AddEffect2D type 7 (EffectInterlude) @0x30268, every success */
     }
     return grade;
 }
@@ -381,6 +558,9 @@ static int check_normal(Game *g, Note *n, int board, int dir) {
     n->active = false;
     n->grade = grade;
     g->counts[grade]++;
+    /* StatusData AddTmpFlickSuccessNum (@0x232a8, grade >= 4: the right key and direction) */
+    if (grade >= 4 && n->board >= 0 && n->board < NUM_KEYS && n->flick >= 0 && n->flick < NUM_FLICK_DIRS)
+        g->flick_success[n->board][n->flick]++;
 
     bool sp = false;
     int bonus = 0;
@@ -395,7 +575,7 @@ static int check_normal(Game *g, Note *n, int board, int dir) {
         if (n->crimax && grade > 4 && g->combo >= 100) {
             g->stage_score += 200;
             sp = true;
-            fx_add(g, FX_SPSCORE, g->gd->addscore[grade] + bonus + 200);
+            sp_start(g, g->gd->addscore[grade] + bonus + 200);
         }
     }
     g->stage_score += g->gd->addscore[grade + (wrong ? 6 : 0)];
@@ -411,7 +591,6 @@ static int check_normal(Game *g, Note *n, int board, int dir) {
     g->last_grade = grade;
     g->last_grade_t = g->t;
     fx_add(g, FX_RESULT, grade);
-    if (grade >= 4) fx_add(g, FX_PULSE, grade);
     return grade;
 }
 
@@ -487,6 +666,7 @@ static void autoplay(Game *g) {
         n->down = n->up = n->just;
         if (n->type == NOTE_INTERLUDE) check_interlude(g, n);
         else check_normal(g, n, n->board, n->flick);
+        fx_add(g, FX_PULSE, 0);   /* port: the board release this stands for adds the EffectPulse */
     }
 }
 
@@ -538,11 +718,10 @@ static void autoplay_input(Game *g) {
 static int key_at(Game *g, float x, float y) {
     /* e_FlickBoardPictTbl positions are TOP-LEFT corners (UIKit rect origins), as the
        board is drawn: あ covers x 129..256, y 530..638 and the board spans 129..510 x 530..962. */
-    if (g->interlude_mode) {
-        /* TouchFlickBoard setInterludeRect: the whole board is one panel
-           (flickguide_int_* is drawn at (114,530), 409x350; わ's row stays live too) */
-        return (x >= 114 && x < 523 && y >= 530 && y < 962) ? 0 : -1;
-    }
+    /* -[TouchFlickBoard setInterludeRect:1] @0x6ff50 (board 0 only): collision rect = the
+       flickguide_int_on frame (409x350 px) at ((640 - 409) / 2, 530) = x 115.5..524.5, y 530..880. Boards
+       1-9 keep their own rects, so the part of わ below y 880 stays live (any board judges an interlude). */
+    if (g->interlude_mode && x >= 115.5f && x < 524.5f && y >= 530 && y < 880) return 0;
     for (int k = 0; k < NUM_KEYS; k++) {
         const BoardKey *b = &g->gd->board[k];
         if (x >= b->px && x < b->px + KEY_W && y >= b->py && y < b->py + KEY_H) return k;
@@ -570,6 +749,8 @@ static void press(Game *g, int kind, SDL_FingerID fid, float x, float y, int key
     for (int i = 0; i < MAX_POINTERS; i++) if (!g->ptr[i].down) { p = &g->ptr[i]; break; }
     if (!p) return;
     *p = (Pointer){true, kind, fid, key, x, y, x, y, 0, 0};
+    g->key_down_ms[key] = SDL_GetTicks() | 1;   /* port: minimum visible press */
+    g->key_up_dir[key] = 0;
     touch_down_all(g); /* TouchFlickBoard touchDown -> NoteManager setTouchDown */
 }
 
@@ -581,9 +762,12 @@ static void move(Game *g, Pointer *p, float x, float y) {
 
 static void release(Game *g, Pointer *p, int dir) {
     p->down = false;
+    g->key_up_dir[p->key] = dir;   /* port: the flower of a short press shows its final direction */
     touch_up_all(g);
     judge(g, p->key, dir);
-
+    /* -[TouchFlickBoard touchUp:] @0x6fec6: AddEffect2D type 3 (EffectPulse) after checkResult on
+       every board release, hit or not, interlude panel included */
+    fx_add(g, FX_PULSE, 0);
 }
 
 static int board_key_for(SDL_Keycode k) {
@@ -624,9 +808,26 @@ static int held_arrow(void) {
 /* WindowGameWindow pauseGame @0x39138: TouchBack(RESUME) y=574, TouchRetry(RETRY) y=656,
    TouchRetry No2 (MUSIC SELECT) y=740; menubutton_m at x=164 */
 static const float k_pause_y[3] = {574, 656, 740};
+/* TouchInputTiming (WindowGameWindow init @0x39528, type 0x3d in m_PauseTouch, shown with the pause
+   menu): m_Pos (113, 895), touch box 440 wide from y 895. touchMoved @0x7da9c: once the pointer is more
+   than 10 UIKit points (20 px) from the last step point, one step (right = -1, left = +1, clamped to -10..+10) and the
+   step point moves to the pointer; a tap alone changes nothing. Stored per song (MusicData). */
+static bool timing_hit(float mx, float my) { return mx >= 113 && mx < 553 && my >= 885; }
 
+static void timing_step(Game *g, int d) {
+    int t = g->opt->input_timing + d;
+    g->opt->input_timing = t < -10 ? -10 : t > 10 ? 10 : t;
+}
+
+static int pause_hit(float mx, float my) {
+    for (int i = 0; i < 3; i++)
+        if (mx >= 164 && mx < 164 + 324 && my >= k_pause_y[i] && my < k_pause_y[i] + 82) return i;
+    return -1;
+}
+
+/* chosen on touch up: TouchBack (RESUME) plays SE 8, TouchRetry (RETRY / MUSIC SELECT) SE 19 */
 static void pause_choose(Game *g, int i) {
-    play_sound(g->as, SND_HIT);
+    play_sound(g->as, i == 0 ? SE_BACK : SE_BUTTON);
     if (i == 0) { g->paused = false; mixer_music_pause(false); }
     else if (i == 1) { g->retry = true; g->finished = true; }
     else { g->quit = true; g->finished = true; }
@@ -635,9 +836,26 @@ static void pause_choose(Game *g, int i) {
 SDL_Texture *game_backdrop(const Game *g) { return g ? video_texture(g->video) : NULL; }
 
 void game_pause(Game *g) {
-    if (!g || !g->loaded || g->finished || g->paused || g->opt->pv_mode) return;
-    g->paused = true;
-    mixer_music_pause(true);
+    if (!g || !g->loaded || g->finished || g->paused) return;   /* PV view too: -[WindowPVView SetInit:] @0x47498 */
+    enter_pause(g, true);
+}
+
+/* TouchPause: 80x80 box at (570,890), left-handed (19,890); pausebutton (51x51) drawn 5/9 px inside */
+static float pbtn_x(const Game *g) { return g->opt->left_hand ? 19.0f : 570.0f; }
+static bool pbtn_hit_g(const Game *g, float x, float y) {
+    float bx = pbtn_x(g);
+    return x >= bx && x < bx + 80 && y >= 890 && y < 970;
+}
+
+/* -[TouchPause touchUp:] @0x72910: on release over the button, once WindowManager GetFadeAlpha <= 0 and
+   while CriManager GetMovieFrame < GetMovieTotalFrame: TouchCallback (pause) and SoundManager Play:19.
+   port: "during fades" uses m_Fade, and the movie-end test is the last 2 s of the song (per the audit). */
+static void pbtn_release(Game *g, float x, float y) {
+    g->pbtn_down = false;
+    if (!pbtn_hit_g(g, x, y) || g->fade > 0.0f || g->finished || g->paused) return;
+    if (g->t >= mixer_music_length() - 2.0) return;
+    play_sound(g->as, SE_BUTTON);
+    enter_pause(g, true);
 }
 
 void game_event(Game *g, const SDL_Event *e) {
@@ -647,26 +865,27 @@ void game_event(Game *g, const SDL_Event *e) {
         (e->type == SDL_KEYDOWN || e->type == SDL_KEYUP || e->type == SDL_MOUSEBUTTONDOWN || e->type == SDL_MOUSEBUTTONUP ||
          e->type == SDL_MOUSEMOTION || e->type == SDL_FINGERDOWN || e->type == SDL_FINGERUP || e->type == SDL_FINGERMOTION))
         stamp_event(g, e);
-    if (g->opt->pv_mode) {   /* PV view: Esc / click returns to PV select, L/K toggle lyrics/karaoke */
-        if ((e->type == SDL_KEYDOWN && !e->key.repeat &&
-             (e->key.keysym.sym == SDLK_ESCAPE || e->key.keysym.sym == SDLK_BACKSPACE)) ||
-            (e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT)) {
-            g->quit = true;
-            g->finished = true;
-        }
+    if (g->opt->pv_mode) {   /* PV view: WindowPVView swipes, pause button and menu (pvview.c) */
+        int a = pvview_event(g->as, g->opt, e, g->paused, g->t, g->t >= mixer_music_length() - 2.0);
+        if (a == PVV_PAUSE || a == PVV_RESUME) enter_pause(g, a == PVV_PAUSE);
+        else if (a == PVV_RELOAD || a == PVV_LEAVE) { g->quit = a == PVV_LEAVE; g->finished = true; }
         return;
     }
     if (e->type == SDL_KEYDOWN && !e->key.repeat) {
         SDL_Keycode k = e->key.keysym.sym;
         if (k == SDLK_ESCAPE || k == SDLK_p) {
-            g->paused = !g->paused;
-            mixer_music_pause(g->paused);
+            /* port: keyboard toggle; sounds as the pause button (SE 19) and RESUME (SE 8) */
+            play_sound(g->as, g->paused ? SE_BACK : SE_BUTTON);
+            enter_pause(g, !g->paused);
             return;
         }
         if (g->paused) { /* pause menu: RESUME / RETRY / MUSIC SELECT */
+            if (k == SDLK_UP || k == SDLK_DOWN) g->pause_kbd = true;
             if (k == SDLK_UP) g->pause_focus = (g->pause_focus + 2) % 3;
             if (k == SDLK_DOWN) g->pause_focus = (g->pause_focus + 1) % 3;
             if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) pause_choose(g, g->pause_focus);
+            if (k == SDLK_LEFT) timing_step(g, 1);     /* port: the keyboard moves the timing cursor too */
+            if (k == SDLK_RIGHT) timing_step(g, -1);
             return;
         }
         int bk = board_key_for(k);
@@ -685,11 +904,38 @@ void game_event(Game *g, const SDL_Event *e) {
         }
         return;
     }
-    if (g->paused) {
-        if (e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT) {
+    if (g->paused) {   /* TouchBack / TouchRetry: pressed on down, chosen on release over the same button */
+        if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT &&
+            timing_hit((float)e->button.x, (float)e->button.y)) {
+            g->timing_drag = true;
+            g->timing_x = (float)e->button.x;
+            g->pause_kbd = false;
+            return;
+        }
+        if (e->type == SDL_MOUSEMOTION && g->timing_drag) {
+            float dx = (float)e->motion.x - g->timing_x;
+            if (fabsf(dx) > 20.0f) { timing_step(g, dx > 0 ? -1 : 1); g->timing_x = (float)e->motion.x; }   /* 10 points @0x7dab0 */
+            return;
+        }
+        if (e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT && g->timing_drag) {
+            g->timing_drag = false;
+            return;
+        }
+        if ((e->type == SDL_MOUSEBUTTONDOWN || e->type == SDL_MOUSEBUTTONUP) && e->button.button == SDL_BUTTON_LEFT) {
             float mx = (float)e->button.x, my = (float)e->button.y;
-            for (int i = 0; i < 3; i++)
-                if (mx >= 164 && mx < 164 + 324 && my >= k_pause_y[i] && my < k_pause_y[i] + 82) pause_choose(g, i);
+            int hit = pause_hit(mx, my);
+            if (e->type == SDL_MOUSEBUTTONDOWN) {
+                g->pause_press = hit; g->pause_kbd = false;
+                g->pause_dn_ms = SDL_GetTicks(); g->pause_lg_until = 0;
+            } else {
+                int was = g->pause_press;
+                if (was >= 0 && SDL_GetTicks() - g->pause_dn_ms < MIN_PRESS_MS) {   /* port: quick click */
+                    g->pause_lg = was;
+                    g->pause_lg_until = g->pause_dn_ms + MIN_PRESS_MS;
+                }
+                g->pause_press = -1;
+                if (hit >= 0 && hit == was) pause_choose(g, hit);
+            }
         }
         return;
     }
@@ -700,23 +946,37 @@ void game_event(Game *g, const SDL_Event *e) {
     }
     if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT && e->button.which != SDL_TOUCH_MOUSEID) {
         float x = (float)e->button.x, y = (float)e->button.y;
-        if (x > 570 && y > 890) { g->paused = true; mixer_music_pause(true); return; } /* pause button */
+        if (pbtn_hit_g(g, x, y)) { g->pbtn_down = true; g->pbtn_kind = PTR_MOUSE; g->pbtn_ms = SDL_GetTicks() | 1; return; } /* TouchPause touchDown */
         press(g, PTR_MOUSE, 0, x, y, key_at(g, x, y));
     } else if (e->type == SDL_MOUSEMOTION && e->motion.which != SDL_TOUCH_MOUSEID) {
         Pointer *p = ptr_find(g, PTR_MOUSE, 0);
         if (p) move(g, p, (float)e->motion.x, (float)e->motion.y);
     } else if (e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT && e->button.which != SDL_TOUCH_MOUSEID) {
+        if (g->pbtn_down && g->pbtn_kind == PTR_MOUSE) { pbtn_release(g, (float)e->button.x, (float)e->button.y); return; }
         Pointer *p = ptr_find(g, PTR_MOUSE, 0);
         if (p) { p->x1 = (float)e->button.x; p->y1 = (float)e->button.y; release(g, p, flick_dir(p)); }
     } else if (e->type == SDL_FINGERDOWN || e->type == SDL_FINGERMOTION || e->type == SDL_FINGERUP) {
+        /* port: macOS trackpads report fingers as SDL_TOUCH_DEVICE_INDIRECT_RELATIVE touches whose x/y are
+           trackpad positions, not screen positions: they would press phantom keys next to the mouse's own */
+        if (SDL_GetTouchDeviceType(e->tfinger.touchId) == SDL_TOUCH_DEVICE_INDIRECT_RELATIVE) return;
         int ww, wh;
         SDL_GetWindowSize(SDL_RenderGetWindow(g->ren), &ww, &wh);
         float lx, ly;
         view_window_to_logical(g->ren, e->tfinger.x * ww, e->tfinger.y * wh, &lx, &ly);
         if (e->type == SDL_FINGERDOWN) {
-            if (lx > 570 && ly > 890) { game_pause(g); return; } /* pause button */
+            if (pbtn_hit_g(g, lx, ly) && !g->pbtn_down) {   /* TouchPause touchDown */
+                g->pbtn_down = true;
+                g->pbtn_kind = PTR_FINGER;
+                g->pbtn_fid = e->tfinger.fingerId;
+                g->pbtn_ms = SDL_GetTicks() | 1;
+                return;
+            }
             press(g, PTR_FINGER, e->tfinger.fingerId, lx, ly, key_at(g, lx, ly));
         } else {
+            if (g->pbtn_down && g->pbtn_kind == PTR_FINGER && g->pbtn_fid == e->tfinger.fingerId) {
+                if (e->type == SDL_FINGERUP) pbtn_release(g, lx, ly);
+                return;
+            }
             Pointer *p = ptr_find(g, PTR_FINGER, e->tfinger.fingerId);
             if (!p) return;
             if (e->type == SDL_FINGERMOTION) move(g, p, lx, ly);
@@ -733,17 +993,22 @@ Game *game_create(SDL_Renderer *ren, Assets *as, const GameData *gd, const Optio
     g->ren = ren;
     g->as = as;
     g->gd = gd;
-    g->opt = opt;
+    /* the caller's Options is a mutable object (main.c); const only in the shared prototype */
+    g->opt = (Options *)opt;
     g->song = song;
     g->diff = diff;
     g->gauge = 128.0f;       /* NoteManager Reset */
-    g->board_alpha = 1.0f;
+    g->ui_alpha = 0.0f;      /* initGame: WindowManager SetUIAlpha:0, the FadeIn cue brings the UI in */
+    g->fade = 1.0f;          /* WindowGameWindow setFade: start from black */
+    g->clock_last = SDL_GetTicks();
+    g->pause_press = -1;
     g->bpm = gd->songs[song].bpm;
     g->delay_ms = (int)(center_time(g->bpm) * 1000.0f);
     g->last_grade_t = -10;
 
     char path[1024];
     snprintf(path, sizeof path, "%s/%s.usm", as->appdir, gd->songs[song].movie);
+    if (opt->pv_mode) pvview_begin(path, song, gd->nsongs);   /* WindowPVView init, or a ReLoad in place */
     if (!usm_read_cues(path, &g->cues) || g->cues.n == 0) {
         log_msg("no chart in %s", path);
         free(g);
@@ -772,8 +1037,34 @@ void game_destroy(Game *g) {
     free(g);
 }
 
+/* testing aid: MF_TEST_HOLD="x,y,dx,dy,t0,t1" (logical px, song seconds) holds a synthetic finger pressed
+   at (x,y) from t0, dragged by (dx,dy), released at t1, through the real press/move/release path, so
+   --shot-times can capture the pressed key, its flower guide and the interlude panel */
+static void test_hold(Game *g) {
+    static const char *spec;
+    static bool parsed;
+    static float hx, hy, hdx, hdy, t0, t1;
+    if (!parsed) {
+        parsed = true;
+        spec = getenv("MF_TEST_HOLD");
+        if (spec && sscanf(spec, "%f,%f,%f,%f,%f,%f", &hx, &hy, &hdx, &hdy, &t0, &t1) != 6) spec = NULL;
+    }
+    if (!spec) return;
+    const SDL_FingerID fid = 0x7e57;
+    Pointer *p = ptr_find(g, PTR_FINGER, fid);
+    if (!p && g->t >= t0 && g->t < t1) {
+        press(g, PTR_FINGER, fid, hx, hy, key_at(g, hx, hy));
+        p = ptr_find(g, PTR_FINGER, fid);
+        if (p) move(g, p, hx + hdx, hy + hdy);
+    } else if (p && g->t >= t1) {
+        release(g, p, flick_dir(p));
+        t0 = t1 = 1e9f;   /* once per run */
+    }
+}
+
 bool game_update(Game *g) {
     if (g->finished) return false;
+    for (int n = clock_steps(g); n > 0; n--) window_step(g);   /* WindowGameWindow exec, even while paused */
     if (g->paused) return true;
     g->evt_dcnt = 0;          /* autoplay presses below happen "now" */
     g->t = mixer_music_time();
@@ -781,9 +1072,13 @@ bool game_update(Game *g) {
     while (g->next_cue < g->cues.n && (double)g->cues.cues[g->next_cue].time_ms <= g->t * 1000.0)
         fire_cue(g, g->cues.cues[g->next_cue++].param);
     g->play_cnt = (int)ceil(g->t * 30.0);
+    /* WindowManager exec: UI fades, one step per PlayCnt tick (port: at most 8 per frame) */
+    if (g->play_cnt - g->ui_tick > 8) g->ui_tick = g->play_cnt - 8;
+    while (g->ui_tick < g->play_cnt) { ui_step(g); g->ui_tick++; }
     exec_notes(g);
     if (g->opt->autoplay) autoplay(g);
     else if (g->opt->autoplay_input) autoplay_input(g);
+    test_hold(g);
     video_update(g->video, g->t);
     if (g->game_over) { g->finished = true; mixer_music_stop(); return false; }
     if (!mixer_music_playing() && g->t >= mixer_music_length() - 0.05) { g->finished = true; return false; }
@@ -801,30 +1096,142 @@ bool game_update(Game *g) {
  * See docs/re_notes.md §6.
  */
 
+/* note sheet: e_CharPictTbl tex 4/6 (+1 when enabled). SystemTexture LoadBoardTex also swaps the hiragana
+   sheets for their _fullroman / _romanhira versions with the KEYBOARD option (same tile layout); the
+   katakana sheets have no such versions */
+static const Atlas *kana_sheet(Game *g, int ch, bool playable) {
+    int kb = g->opt->keyboard, t = playable ? 1 : 0;
+    if (g->gd->kana[ch].tex >= 6) return &g->as->kana_tex[2 + t];
+    if (kb >= 1 && kb <= 2 && g->as->kana_kb[kb - 1][t].tex) return &g->as->kana_kb[kb - 1][t];
+    return &g->as->kana_tex[t];
+}
+
 /* note glyph: RenderTex2DClip(tex, pos.x-39, pos.y, 78x78) */
 static void draw_kana(Game *g, int ch, bool playable, float x, float y, Uint8 alpha) {
     const KanaInfo *k = &g->gd->kana[ch];
-    int sheet = (k->tex >= 6 ? 2 : 0) + (playable ? 1 : 0); /* e_CharPictTbl tex 4/6 (+1 when enabled) */
     SDL_Rect src = {k->x, k->y, 78, 78};
-    spr_tl_rect(g->ren, &g->as->kana_tex[sheet], &src, x, y, 78, 78, alpha);
+    spr_tl_rect(g->ren, kana_sheet(g, ch, playable), &src, x, y, 78, 78, alpha);
 }
 
-/* guidepanel_on_0N by flick direction (0 tap,1 up,2 right,3 down,4 left) */
-static const char *guide_frame(int dir) {
-    static const char *f[5] = {"guidepanel_on_00", "guidepanel_on_01", "guidepanel_on_04", "guidepanel_on_02", "guidepanel_on_03"};
-    return f[dir < 0 || dir > 4 ? 0 : dir];
+/* s_tblKeyGuideTexIdx @0x139460 (guidepanel_off) / _Next @0x139474 (guidepanel_on), indexed by flick
+   code (0 tap,1 up,2 right,3 down,4 left); the sprites are ordered tap, up, down, left, right */
+static const char *guide_frame(int dir, bool next) {
+    static const char *f[2][5] = {
+        {"guidepanel_off_00", "guidepanel_off_01", "guidepanel_off_04", "guidepanel_off_02", "guidepanel_off_03"},
+        {"guidepanel_on_00", "guidepanel_on_01", "guidepanel_on_04", "guidepanel_on_02", "guidepanel_on_03"}};
+    return f[next ? 1 : 0][dir < 0 || dir > 4 ? 0 : dir];
 }
+
+/* s_tblRainbow @0x139310: 28 colours (floats / 255) for climax notes */
+static const Uint8 k_rainbow[28][3] = {
+    {134, 253, 135}, {164, 253, 135}, {194, 253, 135}, {224, 253, 135}, {255, 254, 136}, {255, 244, 121}, {255, 230, 106},
+    {255, 218, 91},  {255, 202, 74},  {255, 187, 118}, {255, 172, 152}, {255, 157, 200}, {255, 136, 254}, {235, 144, 254},
+    {215, 152, 254}, {190, 160, 254}, {168, 168, 255}, {143, 175, 255}, {118, 182, 255}, {93, 189, 255},  {78, 199, 254},
+    {93, 211, 254},  {108, 225, 254}, {123, 239, 254}, {136, 254, 254}, {136, 254, 224}, {136, 254, 194}, {136, 254, 164}};
 
 static double ticks_since(const Game *g, double t0) { return (g->t - t0) * 30.0; }
 
-/* WindowGameWindow: 7-digit score at s_tblScorePosX, commas after digit 0 and 3 (x+27), y=8 */
+static Uint8 a255(float a) { return (Uint8)(a <= 0.0f ? 0 : a >= 1.0f ? 255 : a * 255.0f + 0.5f); }
+
+/* Cloud3D RenderTex / RenderTexRot with a colour and blend (1 = alpha, 2 = additive), centred at (cx,cy),
+   w x h px. A negative width (m_StretchRate < 0) draws the sprite mirrored, as GL does. */
+static void fx_tex(SDL_Renderer *r, const Atlas *a, const char *name, float cx, float cy, float w, float h,
+                   float deg, Uint8 cr, Uint8 cg, Uint8 cb, float alpha, int blend) {
+    const Frame *f = atlas_find(a, name);
+    Uint8 al = a255(alpha);
+    if (!f || !a->tex || al == 0) return;
+    SDL_RendererFlip fl = SDL_FLIP_NONE;
+    if (w < 0) { w = -w; fl = SDL_FLIP_HORIZONTAL; }
+    SDL_FRect d = {cx - w * 0.5f, cy - h * 0.5f, w, h};
+    SDL_SetTextureColorMod(a->tex, cr, cg, cb);
+    SDL_SetTextureAlphaMod(a->tex, al);
+    if (blend == 2) SDL_SetTextureBlendMode(a->tex, SDL_BLENDMODE_ADD);
+    SDL_RenderCopyExF(r, a->tex, &f->r, &d, deg, NULL, fl);
+    if (blend == 2) SDL_SetTextureBlendMode(a->tex, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureColorMod(a->tex, 255, 255, 255);
+}
+
+static void frame_size(const Atlas *a, const char *name, float *w, float *h) {
+    const Frame *f = atlas_find(a, name);
+    *w = f ? (float)f->r.w : 0.0f;
+    *h = f ? (float)f->r.h : 0.0f;
+}
+
+/* WindowGameWindow Render: combo whirls (all RenderTexRot, blend 2). Outer A at combo >= 25 (half alpha up
+   to 34), outer B at combo >= 45 (half up to 54), both rgb (1,0.75,0) at (70,480); then the inner whirl,
+   always, rgb (1,0.63,0) at (68,481), 0.75 alpha up to combo 14. Alphas scale with the UI alpha. */
+static void draw_whirls(Game *g) {
+    const Atlas *g1 = &g->as->game1;
+    float w, h, ua = g->ui_alpha;
+    frame_size(g1, "outsidewhirl", &w, &h);
+    if (g->combo >= 25)
+        fx_tex(g->ren, g1, "outsidewhirl", 70, 480, w, h, (float)(360 - g->rot_b), 255, 191, 0,
+               ua * (g->combo <= 34 ? 0.5f : 1.0f), 2);
+    if (g->combo >= 45)
+        fx_tex(g->ren, g1, "outsidewhirl", 70, 480, w, h, (float)g->rot_a, 255, 191, 0,
+               ua * (g->combo <= 54 ? 0.5f : 1.0f), 2);
+    frame_size(g1, "insidewhirl", &w, &h);
+    fx_tex(g->ren, g1, "insidewhirl", JUDGE_CX, LANE_CY, w, h, (float)(360 - g->rot_star), 255, 161, 0,
+           ua * (g->combo <= 14 ? 0.75f : 1.0f), 2);
+}
+
+/* -[EffectPulse render] @0x2e3d8, tick n (exec @0x2e25c: m_NormalRate = 1 + 0.92 sin(n/10 * 1.57) + bonus; alpha
+   1 - 0.2 (n - 5) over the last 5 ticks; m_Timer 10). ripple (TP 0x11d) 120*rate px centred (70,482), blend 2.
+   Outside interlude, at combo >= 15 and n <= 7, the fireworks_mik rings: _01 (combo >= 15, half alpha up to
+   24, x1.35 from 75, x1.4 from 95), _00 (combo >= 35, half up to 44, x1.15/1.25/1.35/1.4 from 55/65/75/95),
+   _02 (combo >= 85, half up to 94, x1.25, x1.4 from 95), all 120*rate*k px at the same centre. */
+static void draw_pulse(Game *g, int n) {
+    const Atlas *ef = &g->as->effect1;
+    if (n < 1 || n >= 10) return;
+    /* + (int)(((combo - 50) / 5) * 0.02), at least 0: nonzero only from combo 300 */
+    int bonus = (int)((float)((g->combo - 50) / 5) * 0.02f);
+    float rate = 1.0f + 0.92f * sinf((float)n / 10.0f * 1.57f) + (float)(bonus > 0 ? bonus : 0);
+    float alpha = n > 5 ? 1.0f - 0.2f * (float)(n - 5) : 1.0f;
+    float s = 120.0f * rate;
+    fx_tex(g->ren, ef, "ripple", 70, 482, s, s, 0, 255, 255, 255, alpha, 2);
+    int c = g->combo;
+    if (g->int_panel || c < 15 || n > 7) return;   /* WindowManager IsInterludeMode = s_IsInterlude (int_panel) */
+    float k = c >= 95 ? 1.4f : c >= 75 ? 1.35f : 1.0f;
+    fx_tex(g->ren, ef, "fireworks_mik_01", 70, 482, s * k, s * k, 0, 255, 255, 255, alpha * (c <= 24 ? 0.5f : 1.0f), 2);
+    if (c < 35) return;
+    k = c >= 95 ? 1.4f : c >= 75 ? 1.35f : c >= 65 ? 1.25f : c >= 55 ? 1.15f : 1.0f;
+    fx_tex(g->ren, ef, "fireworks_mik_00", 70, 482, s * k, s * k, 0, 255, 255, 255, alpha * (c <= 44 ? 0.5f : 1.0f), 2);
+    if (c < 85) return;
+    k = c >= 95 ? 1.4f : 1.25f;
+    fx_tex(g->ren, ef, "fireworks_mik_02", 70, 482, s * k, s * k, 0, 255, 255, 255, alpha * (c <= 94 ? 0.5f : 1.0f), 2);
+}
+
+/* WindowGameWindow Render: SpScore popup, 4 digits of score % 10000 (leading zeros skipped) as score_0d
+   at x = 508 + 28 i, y = m_SpScorePosY, rgb (1,1,0.66) */
+static void draw_spscore(Game *g) {
+    if (!g->sp_on) return;
+    int v = g->sp_score % 10000, div = 1000;
+    bool started = false;
+    for (int i = 0; i < 4; i++, div /= 10) {
+        int d = (v / div) % 10;
+        if (d > 0 || i == 3) started = true;
+        if (!started) continue;
+        char name[16];
+        snprintf(name, sizeof name, "score_%02d", d);
+        const Frame *f = atlas_find(&g->as->game1, name);
+        if (!f) continue;
+        SDL_SetTextureColorMod(g->as->game1.tex, 255, 255, 168);
+        spr_tl(g->ren, &g->as->game1, name, 508.0f + 28.0f * (float)i, g->sp_y, a255(g->sp_alpha));
+        SDL_SetTextureColorMod(g->as->game1.tex, 255, 255, 255);
+    }
+}
+
+/* -[WindowGameWindow Render] @0x39ea0-0x3a034: score = TmpStageScore + TmpComboScore, 7 digits
+   ((v % 10^(7-i)) / 10^(6-i)) as score_0d (TP 0x167+d) at s_tblScorePosX[i], y 8, z 4.5+0.1i, colour
+   (1,1,1,1), blend 1; a digit is drawn only once a non-zero digit has been seen (no forced units digit,
+   so a score of 0 draws nothing); score_10 comma (TP 0x171) at x+27 after digit 0 and 3 */
 static void draw_score(Game *g, int value) {
     char name[32];
     int div = 1000000;
     bool started = false;
     for (int i = 0; i < 7; i++, div /= 10) {
         int d = (value / div) % 10;
-        if (d > 0 || i == 6) started = true;
+        if (d > 0) started = true;
         if (!started) continue;
         snprintf(name, sizeof name, "score_%02d", d);
         spr_tl(g->ren, &g->as->game1, name, (float)g->gd->score_posx[i], 8, 255);
@@ -832,16 +1239,21 @@ static void draw_score(Game *g, int value) {
     }
 }
 
-/* high score: label (5,8); digits left-aligned from x=129, 14 px stride, comma +13 (adds 6), y=7 */
+/* -[WindowGameWindow Render] @0x3a038-0x3a26c: MusicData GetTopScore: of the playing song/difficulty;
+   digits highscore_0d (TP 0x14b+d) left-aligned from x=129, 14 px stride, y 7, leading zeros skipped
+   (no forced units digit), highscore_10 comma (TP 0x155) at x+13 after digit 0 and 3 (adds 6); the
+   "High Score" label highscore_11 (TP 0x156) at (5,8) only when a digit was drawn (@0x3a206), so with no
+   high score yet (0) nothing at all is drawn. Colour (1,1,1,1), blend 1. */
 static void draw_highscore(Game *g, int value) {
     char name[32];
+    if (value % 10000000 <= 0) return;
     spr_tl(g->ren, &g->as->game1, "highscore_11", 5, 8, 255);
     float x = 129;
     int div = 1000000;
     bool started = false;
     for (int i = 0; i < 7; i++, div /= 10) {
         int d = (value / div) % 10;
-        if (d > 0 || i == 6) started = true;
+        if (d > 0) started = true;
         if (!started) continue;
         snprintf(name, sizeof name, "highscore_%02d", d);
         spr_tl(g->ren, &g->as->game1, name, x, 7, 255);
@@ -850,18 +1262,28 @@ static void draw_highscore(Game *g, int value) {
     }
 }
 
-/* combo (>=5): combonumber digits from x=6, 18 px stride, y=517, then the "combo" label */
-static void draw_combo(Game *g) {
-    if (g->combo < 5) return;
-    char num[16], name[32];
-    snprintf(num, sizeof num, "%d", g->combo);
+/* -[WindowGameWindow Render] @0x3a808-0x3a9ce: only at StatusData GetCombo >= 5. 4 digits of combo % 10000
+   (leading zeros skipped) as combonumber_0d (TP 0x125+d) from x=6, 18 px stride, y 517 + GetBottomOfs,
+   z 4; then the label at x = 18 * digits + 8: combonumber_11 "combo" (TP 0x130), or combonumber_12 "hit"
+   (TP 0x131) when StatusData GetDifficulty == 4 (Break the Limit, where misses don't reset the count).
+   Colour GetColor(GetUIAlpha,1,1,1), blend 1: it fades out with the keys for interludes and is hidden
+   until the FadeIn cue. No animation, timer or milestone effect (the combo's other uses: whirls,
+   EffectPulse rings, rail_01 at 100, climax rainbow notes). */
+static void draw_combo(Game *g, Uint8 alpha) {
+    if (g->combo < 5 || alpha == 0) return;
+    char name[32];
+    int v = g->combo % 10000, div = 1000;
+    bool started = false;
     float x = 6;
-    for (const char *c = num; *c; c++) {
-        snprintf(name, sizeof name, "combonumber_%02d", *c - '0');
-        spr_tl(g->ren, &g->as->game1, name, x, 517, 255);
+    for (int i = 0; i < 4; i++, div /= 10) {
+        int d = (v / div) % 10;
+        if (d > 0) started = true;
+        if (!started) continue;
+        snprintf(name, sizeof name, "combonumber_%02d", d);
+        spr_tl(g->ren, &g->as->game1, name, x, 517, alpha);
         x += 18;
     }
-    spr_tl(g->ren, &g->as->game1, "combonumber_11", x + 2, 517, 255);
+    spr_tl(g->ren, &g->as->game1, g->diff == DIFF_BREAK ? "combonumber_12" : "combonumber_11", x + 2, 517, alpha);
 }
 
 /* KEYBOARD option: SystemTexture LoadBoardTex picks game_tex_02 / _fullroman / _romanhira */
@@ -871,24 +1293,34 @@ static const Atlas *key_atlas(Game *g) {
     return &g->as->game2;
 }
 
-/* flick "flower" around a held key: RenderGuideUp/Down/Left/Right @0x6f228.. */
-static void draw_flower(Game *g, int key, int dir) {
+/* flick "flower" around a held key: -[TouchFlickBoard RenderGuide:] @0x6f860 with the current flick
+   direction. Direction 0 (no flick yet): all petals unlit, only with the FLOWER option on. Once the
+   finger has a direction: only that petal, lit, whatever the option (when the key has a character
+   there). RenderGuideUp/Down/Left/Right @0x6f228..: flickguide_*_00..03 (TP 312..315, +4 lit) and the
+   e_GuideCharPictIdx glyph (fgcharacter_ori, TP 370 + idx); the table is indexed by flick code.
+   Petals (z -1.2) and glyphs (z -1.3) use GetColor(GetUIAlpha,1,1,1), blend 1: they fade with the keys.
+   RenderGuide: returns at once while the board's m_InterludeMode is set (only board 0 gets it, from
+   StartInterludeMode until the interlude panel has faded out: WindowManager exec @0x3e3ac). */
+static void draw_flower(Game *g, int key, int dir, Uint8 alpha) {
     const BoardKey *b = &g->gd->board[key];
     float px = (float)b->px, py = (float)b->py;
     static const float petal[4][2] = {{7, -109}, {7, 82}, {-127, 3}, {99, 3}};  /* up, down, left, right */
     static const float glyph[4][2] = {{36, -85}, {36, 136}, {-90, 26}, {160, 26}};
-    static const int guide_slot[4] = {1, 3, 4, 2};  /* e_GuideCharPictIdx {centre,up,right,down,left} */
     static const int dir_of[4] = {1, 3, 4, 2};      /* flick code of each petal */
+    if (key == 0 && g->int_panel) return;           /* m_InterludeMode */
+    if (dir == 0 && !g->opt->flower) return;         /* StatusData IsFlowerEnable */
+    if (alpha == 0) return;
     const Atlas *a2 = key_atlas(g);
     for (int p = 0; p < 4; p++) {
-        int gi = g->gd->guide[key][guide_slot[p]];
+        if (dir != 0 && dir != dir_of[p]) continue;
+        int gi = g->gd->guide[key][dir_of[p]];
         if (gi < 0) continue;
         char name[32];
-        bool on = (dir == dir_of[p]);
+        bool on = dir != 0;
         snprintf(name, sizeof name, "flickguide_%s_%02d", on ? "on" : "off", p);
-        spr_tl(g->ren, &g->as->game1, name, px + petal[p][0], py + petal[p][1], 255);
+        spr_tl(g->ren, &g->as->game1, name, px + petal[p][0], py + petal[p][1], alpha);
         snprintf(name, sizeof name, "fgcharacter_ori_%02d", gi);
-        spr_tl(g->ren, a2, name, px + glyph[p][0], py + glyph[p][1], 255);
+        spr_tl(g->ren, a2, name, px + glyph[p][0], py + glyph[p][1], alpha);
     }
 }
 
@@ -905,49 +1337,72 @@ void game_render(Game *g) {
     }
 
     if (g->opt->pv_mode) {
-        /* ScenePVView: full-screen movie; NoteManager render_Lyrics draws the line at y=896 (shadow 898) */
-        if (g->lyric[0]) font_draw(r, g->lyric, 320, 880, 2.8f, (SDL_Color){255, 255, 255, 255}, 0);
+        /* ScenePVView: full-screen movie; lyrics, pause button/menu, fade and swipe arrows in pvview.c */
+        pvview_render(r, as, g->opt, g->paused, vt != NULL, g->lyric);
         return;
     }
     const Atlas *g1 = &as->game1, *ef = &as->effect1;
-    double tick = g->t * 30.0;  /* 30 Hz animation clock */
-    Uint8 ui_a = (Uint8)(255 * g->board_alpha);
+    Uint8 ui_a = a255(g->ui_alpha);    /* WindowManager GetUIAlpha */
+    Uint8 int_a = a255(g->int_alpha);  /* GetInterludeUIAlpha */
 
     /* --- WindowGameWindow Render: HUD --- */
     draw_score(g, g->stage_score + g->combo_score);
     draw_highscore(g, g->highscore);
 
-    /* judge circle: charactercircle_int (-2,408) in interlude, charactercircle (8,421), outsidecircle (-9,404) */
-    if (g->interlude_mode) spr_tl(r, g1, "charactercircle_int", -2, 408, 255);
-    else spr_tl(r, g1, "charactercircle", 8, 421, ui_a);
-    spr_tl(r, g1, "outsidecircle", -9, 404, 255);
+    /* judge circle (@0x3a390-0x3a592): charactercircle_int (TP 0x124) at (-2,408) with the interlude alpha
+       while it is > 0; then, only while GetUIAlpha > 0 (@0x3a474), charactercircle (TP 0x123) at (8,421)
+       and outsidecircle (TP 0x15e) at (-9,404), both with the UI alpha */
+    if (g->int_alpha > 0.0f) spr_tl(r, g1, "charactercircle_int", -2, 408, int_a);
+    if (g->ui_alpha > 0.0f) {
+        spr_tl(r, g1, "charactercircle", 8, 421, ui_a);
+        spr_tl(r, g1, "outsidecircle", -9, 404, ui_a);
+    }
 
-    /* rail: rail_00 at (0,424) stretched to 640; at combo >= 100 the scrolling rail_01 */
+    /* rail (@0x3a592-0x3a804): rail_00 (TP 0x165) at (0,424) stretched to 640 x frame height, z 5.2; at
+       combo >= 100 rail_01 (TP 0x166) instead at x = -pos and 640 - pos (WindowGameWindow exec: pos =
+       (pos + 32) % 640 per tick). Colour GetColor(GetUIAlpha,1,1,1): the rail is invisible until the FadeIn
+       cue and fades out with the keys during interludes (not an emulator bug). */
     {
         const Frame *rf = atlas_find(g1, "rail_00");
         float rh = rf ? (float)rf->r.h : 116;
         if (g->combo >= 100) {
-            float ofs = (float)fmod(tick * 4.0, 640.0);
-            spr_tl_wh(r, g1, "rail_01", -ofs, 424, 640, rh, 255);
-            spr_tl_wh(r, g1, "rail_01", 640 - ofs, 424, 640, rh, 255);
+            float ofs = (float)g->rail_pos;
+            spr_tl_wh(r, g1, "rail_01", -ofs, 424, 640, rh, ui_a);
+            spr_tl_wh(r, g1, "rail_01", 640 - ofs, 424, 640, rh, ui_a);
         } else {
-            spr_tl_wh(r, g1, "rail_00", 0, 424, 640, rh, 255);
+            spr_tl_wh(r, g1, "rail_00", 0, 424, 640, rh, ui_a);
         }
     }
-    draw_combo(g);
+    draw_combo(g, ui_a);
 
-    /* insidewhirl: RenderTexRot centred (68,481) */
-    spr_rot(r, g1, "insidewhirl", JUDGE_CX, LANE_CY, (float)fmod(tick * 3.0, 360.0), 1.0f, 200);
+    draw_whirls(g);
+    draw_spscore(g);
 
-    /* tension: microphone stand at (4,572); lit stand clipped from the bottom by the gauge */
-    float mic_x = g->opt->left_hand ? 490.0f : 4.0f;   /* HANDEDNESS: right-side gauge (x=490 set) */
-    spr_tl(r, g1, "microphonemeter_00", mic_x, 572, 255);
+    /* tension (WindowGameWindow Render @0x3ad26): microphonemeter_00 (dark stand) and _01 (glowing
+       outline) both whole at y 572, then the _02 fill clipped from the bottom: fill = 362*gauge/256 + 0.5
+       px (362 from the stale e_SystemPictTbl entry), drawn at y = 943 - fill. Right-handed: x 4 / 4 / 15.05;
+       the left-handed layout mirrors it with RenderTexClipReverse at x 490 / 521 / 534. */
     {
-        const Frame *f = atlas_find(g1, "microphonemeter_01");
-        if (f) {
-            int h = (int)(f->r.h * (g->gauge / 256.0f));
-            SDL_Rect src = {f->r.x, f->r.y + f->r.h - h, f->r.w, h};
-            if (h > 0) spr_tl_rect(r, g1, &src, mic_x, 572 + (float)(f->r.h - h), (float)f->r.w, (float)h, 255);
+        bool mirror = g->opt->left_hand;
+        SDL_RendererFlip fl = mirror ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
+        static const char *mic[2] = {"microphonemeter_00", "microphonemeter_01"};
+        static const float mic_x[2][2] = {{4, 4}, {490, 521}};
+        for (int i = 0; i < 2; i++) {
+            const Frame *f = atlas_find(g1, mic[i]);
+            if (!f) continue;
+            SDL_FRect d = {mic_x[mirror][i], 572, (float)f->r.w, (float)f->r.h};
+            SDL_SetTextureAlphaMod(g1->tex, ui_a);
+            SDL_RenderCopyExF(r, g1->tex, &f->r, &d, 0, NULL, fl);
+        }
+        const Frame *f = atlas_find(g1, "microphonemeter_02");
+        float fill = 362.0f * (float)(int)g->gauge / 256.0f + 0.5f;
+        int fh = (int)fill;
+        if (f && fh > 0) {
+            if (fh > f->r.h) fh = f->r.h;
+            SDL_Rect src = {f->r.x, f->r.y + f->r.h - fh, f->r.w, fh};
+            SDL_FRect d = {mirror ? 534.0f : 15.05f, 943.0f - fill, (float)f->r.w, (float)fh};
+            SDL_SetTextureAlphaMod(g1->tex, ui_a);
+            SDL_RenderCopyExF(r, g1->tex, &src, &d, 0, NULL, fl);
         }
     }
 
@@ -963,10 +1418,27 @@ void game_render(Game *g) {
             if (q) spr_tl(r, g1, n->active ? "quaver_00" : "quaver_01", n->x - q->r.w * 0.5f, LANE_CY - q->r.h * 0.5f, a);
             continue;
         }
-        if (n->crimax && n->active)
-            spr_rot(r, g1, "emphasiscircle", n->x, LANE_CY, (float)fmod(tick * 6.0, 360.0), 1.0f, 230);
         /* option (small kana) notes are drawn 32 px right of the base glyph position */
-        draw_kana(g, n->ch, n->playable, n->x - 39 + (n->small ? 32 : 0), NOTE_Y, a);
+        float gx = n->x - 39 + (n->small ? 32 : 0);
+        if (n->crimax && n->active && g->combo >= 100) {
+            /* NoteNormal render @0x2269e: a climax note at combo >= 100 is tinted with
+               s_tblRainbow[(m_CrimaxCnt + 10) % 28] (m_CrimaxCnt counts ticks like m_Cnt) */
+            const Uint8 *c = k_rainbow[((n->cnt + 10) % 28 + 28) % 28];
+            SDL_Texture *kt = kana_sheet(g, n->ch, n->playable)->tex;
+            if (kt) SDL_SetTextureColorMod(kt, c[0], c[1], c[2]);
+            draw_kana(g, n->ch, n->playable, gx, NOTE_Y, a);
+            if (kt) SDL_SetTextureColorMod(kt, 255, 255, 255);
+        } else {
+            draw_kana(g, n->ch, n->playable, gx, NOTE_Y, a);
+        }
+        /* NoteNormal render @0x2292a: every active note carries the emphasiscircle ring, centred at
+           pos + (1,39), angle pi - m_Rot/100 rad; NoteNormal exec: m_Rot = (m_Rot + 21) % 360 per tick */
+        if (n->active && !n->small) {
+            int rot = (int)(((long)n->cnt * 21) % 360);
+            if (rot < 0) rot += 360;
+            float deg = (float)((M_PI - rot / 100.0) * 180.0 / M_PI);
+            spr_rot(r, g1, "emphasiscircle", n->x + 1, NOTE_Y + 39, deg, 1.0f, 255);
+        }
     }
 
     /* last-note direction (inputguide_0N at 26,440) and the timing ring (inputtarget/inputperfect at 69,482) */
@@ -975,106 +1447,189 @@ void game_render(Game *g) {
         if (g->notes[i].active && g->notes[i].type == NOTE_NORMAL && g->notes[i].started) { next = &g->notes[i]; break; }
     if (next && next->cnt >= next->just - 11 && next->cnt <= next->just) {
         char name[32];
-        static const int guide_of_dir[5] = {0, 1, 2, 3, 4};
+        /* s_tblLastNoteTexIdx @0x138f38 = TP frames {278, 279, 282, 280, 281}: the sprites are ordered
+           tap, up, down, left, right while flick codes are tap, up, right, down, left */
+        static const int guide_of_dir[5] = {0, 1, 4, 2, 3};
         snprintf(name, sizeof name, "inputguide_%02d", guide_of_dir[next->flick]);
-        spr_tl(r, ef, name, 26, 440, 255);
+        spr_tl(r, ef, name, 26, 440, ui_a);
         int dist = next->just - next->cnt + 1;
-        if (dist < 2) spr_rot(r, ef, "inputperfect", 69, 482, 0, 1.0f, 255);
+        if (dist < 2) spr_rot(r, ef, "inputperfect", 69, 482, 0, 1.0f, ui_a);
         else {
             float s = 0.48f + 0.52f * (dist > 12 ? 1.0f : dist / 12.0f);
-            spr_rot(r, ef, "inputtarget", 69, 482, 0, s, 255);
+            spr_rot(r, ef, "inputtarget", 69, 482, 0, s, ui_a);
         }
     }
 
-    /* --- effects (30 Hz ticks) --- */
+    /* --- effects (EffectManager render, 30 Hz ticks). EffectManager exec (m_TimeCnt++) runs before render,
+       so the first frame shown is tick n = 1 and an effect is gone at n = m_Timer. Every RenderTex passes a
+       z: the pulse rings (-1 .. -1.3) lie under the results and quavers (-2), so two passes. --- */
+    for (int i = 0; i < MAX_FX; i++) {
+        const Fx *f = &g->fx[i];
+        double age = ticks_since(g, f->t0);
+        if (f->kind == FX_PULSE && age >= 0) draw_pulse(g, (int)floor(age) + 1);
+    }
     for (int i = 0; i < MAX_FX; i++) {
         Fx *f = &g->fx[i];
-        if (f->kind == FX_NONE) continue;
+        if (f->kind == FX_NONE || f->kind == FX_PULSE) continue;
         double age = ticks_since(g, f->t0);
         if (age < 0) continue;
-        if (f->kind == FX_RESULT && age < 20) {
-            /* EffectFlickResult: centred (66,483+ofsY); size 0.1 +0.15/tick (max 1); stretch wobble; fade last 5 ticks */
+        if (f->kind == FX_RESULT && age < 19) {
+            /* -[EffectFlickResult exec] @0x2e914 / render @0x2eb34 (m_Timer 20): centre (66, 483 + m_OfsY);
+               m_SizeRate min(1, 0.1 + 0.15 n); fade over the last 5 ticks. Back layer afterimage_*
+               (s_tblResultEffect_Back @0x13ac3c = TP {286,290,289,288,287,286} by grade) at w*size*stretch
+               (the m_StretchRate flip-spin, exec @0x2ea26) x h*size; then the front evaluation_*
+               (s_tblResultEffect @0x13ac54) at w*size x h*size, not stretched. Both blend 1. */
+            static const int back_idx[6] = {0, 4, 3, 2, 1, 0};
             int grade = f->v < 0 ? 0 : f->v > 5 ? 5 : f->v;
-            double n = floor(age);
-            double ofs = -g->gd->result_ofsy[grade] * sin(n / 20.0 * 1.57) - 80.0 * (1.0 - pow(0.5, n));
-            double size = fmin(1.0, 0.1 + 0.15 * n);
-            double stretch = 1.0; /* m_StretchRate wobble not reproduced (exact use in render unclear) */
-            double alpha = n > 15 ? fmax(0.0, 1.0 - 0.2 * (n - 15)) : 1.0;
+            int n = (int)floor(age) + 1;
+            float ofs = -(float)g->gd->result_ofsy[grade] * sinf((float)n / 20.0f * 1.57f)
+                        - 80.0f * (1.0f - powf(0.5f, (float)n));
+            float size = fminf(1.0f, 0.1f + 0.15f * (float)n);
+            float alpha = n > 15 ? 1.0f - 0.2f * (float)(n - 15) : 1.0f;
             char name[32];
+            float fw, fh;
+            snprintf(name, sizeof name, "afterimage_%02d", back_idx[grade]);
+            frame_size(g1, name, &fw, &fh);
+            fx_tex(r, g1, name, 66, 483 + ofs, fw * size * wobble_stretch(n, 20), fh * size, 0, 255, 255, 255, alpha, 1);
             snprintf(name, sizeof name, "evaluation_%02d", 5 - (grade < 1 ? 1 : grade));
-            const Frame *fr = atlas_find(g1, name);
-            if (fr) {
-                float w = (float)(fr->r.w * size * stretch), h = (float)(fr->r.h * size);
-                spr_tl_wh(r, g1, name, 66 - w * 0.5f, (float)(483 + ofs) - h * 0.5f, w, h, (Uint8)(255 * alpha));
-            }
-        } else if (f->kind == FX_PULSE && age < 15) {
-            /* EffectPulse ripple around the judge point */
-            float s = 0.6f + (float)age * 0.06f;
-            spr_rot(r, ef, "ripple", 70, 482, 0, s, (Uint8)(255 * (1.0 - age / 15.0)));
-        } else if (f->kind == FX_INTERLUDE && age < 20) {
-            /* EffectInterlude: quaver_01 rising from the judge point (70,483) */
-            spr_rot(r, g1, "quaver_01", 70, (float)(483 - age * 4.0), 0, (float)fmin(1.0, 0.3 + age * 0.15),
-                    (Uint8)(255 * (age > 15 ? (20 - age) / 5.0 : 1.0)));
-        } else if (f->kind == FX_SPSCORE && age < 30) {
-            char num[16], name[32];
-            snprintf(num, sizeof num, "%d", f->v);
-            float x = 90, y = (float)(380 - age * 2.0);
-            for (const char *c = num; *c; c++, x += 18) {
-                snprintf(name, sizeof name, "combonumber_%02d", *c - '0');
-                spr_tl(r, g1, name, x, y, (Uint8)(255 * (age > 20 ? (30 - age) / 10.0 : 1.0)));
-            }
+            frame_size(g1, name, &fw, &fh);
+            fx_tex(r, g1, name, 66, 483 + ofs, fw * size, fh * size, 0, 255, 255, 255, alpha, 1);
+        } else if (f->kind == FX_INTERLUDE && age < 19) {
+            /* -[EffectInterlude exec] @0x62be8 / render @0x62de4 (m_Timer 20): tick n = m_TimeCnt;
+               m_SizeRate = min(1, 0.1 + 0.15 n); m_OfsY = -100 sin(n/20 * 1.57) + m_OfsAddTmpY, where
+               m_OfsAddTmpY sums m_OfsAddY (-40, halved each tick) = -80 (1 - 0.5^n); alpha 1 - 0.2 (n - 15)
+               after tick 15. quaver_01 (TP 0x162) w*size*stretch x h*size centred (70, 483 + m_OfsY), blend 1. */
+            int n = (int)floor(age) + 1;
+            float size = fminf(1.0f, 0.1f + 0.15f * (float)n);
+            float ofs = -100.0f * sinf((float)n / 20.0f * 1.57f) - 80.0f * (1.0f - powf(0.5f, (float)n));
+            float alpha = n > 15 ? 1.0f - 0.2f * (float)(n - 15) : 1.0f;
+            float qw, qh;
+            frame_size(g1, "quaver_01", &qw, &qh);
+            fx_tex(r, g1, "quaver_01", 70, 483 + ofs, qw * size * wobble_stretch(n, 20), qh * size, 0,
+                   255, 255, 255, alpha, 1);
         }
     }
 
     /* --- TouchFlickBoard Render: keys at their table position (top-left) --- */
-    int held_key = -1, held_dir = 0;
-    for (int i = 0; i < MAX_POINTERS; i++)
-        if (g->ptr[i].down) {
-            held_key = g->ptr[i].key;
-            held_dir = g->ptr[i].kind == PTR_KEYBOARD ? g->ptr[i].kb_dir : flick_dir(&g->ptr[i]);
-        }
-    if (g->interlude_mode) {
-        /* key 0 draws flickguide_int_off/on at (pos.x-15, pos.y) */
+    /* -[TouchFlickBoard Render] @0x6f9d4, per board: each board tracks its own touch (m_TouchDownIdx), so
+       every held key lights up, not only the last one pressed. The pressed visual is only the texture swap
+       flickpanel_ori_off_NN (TP 416+n) -> flickpanel_ori_on_NN (TP 426+n) @0x6fc14: same rect, no scale, no
+       glow, z -1, GetColor(GetUIAlpha,1,1,1), blend 1, whatever the interlude state (the UI alpha hides the
+       keys during an interlude). m_FlickResult (checkFlick on every touchMoved) picks the lit petal. */
+    const Pointer *held[NUM_KEYS] = {0};
+    for (int i = 0; i < MAX_POINTERS; i++) {
+        const Pointer *p = &g->ptr[i];
+        if (p->down && p->key >= 0 && p->key < NUM_KEYS && !held[p->key]) held[p->key] = p;
+    }
+    bool lit[NUM_KEYS];   /* held, or pressed less than MIN_PRESS_MS ago (port: short clicks) */
+    Uint32 now_ms = SDL_GetTicks();
+    for (int k = 0; k < NUM_KEYS; k++)
+        lit[k] = held[k] || (g->key_down_ms[k] && now_ms - g->key_down_ms[k] < MIN_PRESS_MS);
+    for (int k = 0; k < NUM_KEYS; k++) {
+        const BoardKey *b = &g->gd->board[k];
+        char name[32];
+        snprintf(name, sizeof name, "flickpanel_ori_%s_%02d", lit[k] ? "on" : "off", k);
+        spr_tl(r, key_atlas(g), name, (float)b->px, (float)b->py, ui_a);
+    }
+    if (g->int_panel) {
+        /* board 0, while WindowManager IsInterludeMode (s_IsInterlude, cleared with the panel when the
+           interlude alpha runs out): flickguide_int_on (TP 0x115) while board 0 is held, else _off (0x114),
+           at (pos.x - 15, pos.y), z -1, GetInterludeUIAlpha, blend 1 @0x6fa76..0x6fb72. After
+           EndInterludeMode board 0 is あ again, so holding あ lights the fading panel. */
         const BoardKey *b0 = &g->gd->board[0];
-        spr_tl(r, ef, held_key >= 0 ? "flickguide_int_on" : "flickguide_int_off", (float)b0->px - 15, (float)b0->py, 255);
-    } else {
-        for (int k = 0; k < NUM_KEYS; k++) {
-            const BoardKey *b = &g->gd->board[k];
-            char name[32];
-            snprintf(name, sizeof name, "flickpanel_ori_%s_%02d", held_key == k ? "on" : "off", k);
-            spr_tl(r, key_atlas(g), name, (float)b->px, (float)b->py, ui_a);
-        }
-        /* NoteNormal render: guidecursor + direction panel on the key of the next target note */
-        if (next && held_key < 0 && g->opt->guide_panel) {
-            const BoardKey *b = &g->gd->board[next->board];
-            bool near = next->cnt >= next->just - 11;
-            spr_tl(r, g1, guide_frame(next->flick), (float)b->px, (float)b->py, near ? 255 : 170);
-            spr_tl(r, g1, "guidecursor", (float)b->px, (float)b->py, 255);
-        }
-        if (held_key >= 0 && g->opt->flower) draw_flower(g, held_key, held_dir);
+        spr_tl(r, ef, lit[0] ? "flickguide_int_on" : "flickguide_int_off", (float)b0->px - 15, (float)b0->py, int_a);
+    }
+    /* TouchFlickBoard Render tail @0x6fc44: RenderGuide:m_FlickResult while the board is touched
+       (a released short press keeps the direction it was released with) */
+    for (int k = 0; k < NUM_KEYS; k++) {
+        const Pointer *p = held[k];
+        if (p) draw_flower(g, k, p->kind == PTR_KEYBOARD ? (p->kb_dir ? p->kb_dir : held_arrow()) : flick_dir(p), ui_a);
+        else if (lit[k]) draw_flower(g, k, g->key_up_dir[k], ui_a);
+    }
+    if (!g->interlude_mode) {
+        /* NoteNormal render @0x22a38 (unless PANEL GUIDE is off): every active note up to its just frame
+           shows its direction on its key, scaled by cnt/just (nothing below 0.25) about the panel's
+           rect; the next target uses the _on panel plus guidecursor at key - (3,3), the others the
+           _off panel. Older notes are in front, so draw newest first. The panels (z -1.5 / -4.0) are in
+           front of the flower petals (TouchFlickBoard RenderGuideUp.. z about -1.2 / -1.3), so they go after it. */
+        if (g->opt->guide_panel)
+            for (int i = g->nnotes - 1; i >= 0; i--) {
+                const Note *n = &g->notes[i];
+                if (n->type != NOTE_NORMAL || !n->active || !n->started || n->dead || n->small || n->cnt > n->just)
+                    continue;
+                const BoardKey *b = &g->gd->board[n->board];
+                bool is_next = n == next;
+                if (is_next) spr_tl(r, g1, "guidecursor", (float)b->px - 3, (float)b->py - 3, ui_a);
+                float s = n->just > 0 ? (float)n->cnt / (float)n->just : 1.0f;
+                if (s < 0.25f) continue;
+                const char *pn = guide_frame(n->flick, is_next);
+                const Frame *pf = atlas_find(g1, pn);
+                if (!pf) continue;
+                float fw = (float)pf->r.w, fh = (float)pf->r.h;
+                spr_tl_wh(r, g1, pn, (float)b->px + fw * (1 - s) * 0.5f, (float)b->py + fh * (1 - s) * 0.5f, fw * s, fh * s, ui_a);
+            }
     }
 
-    spr_tl(r, g1, "pausebutton", 575, 899, 220);
+    /* -[TouchPause Render] @0x72738: pausebutton (TP 0x160) colour (1,1,1,1), blend 1, rect scaled 1.05x
+       about its centre (CoordinateScalingPoints) while a touch holds it; hidden by DISPLAY PAUSE: INVISIBLE
+       (IsHidePauseBtn), the touch area stays */
+    if (g->opt->pause_button) {
+        float px = pbtn_x(g) + 5, py = 899, pw, ph;
+        frame_size(g1, "pausebutton", &pw, &ph);
+        bool pb_recent = g->pbtn_ms && SDL_GetTicks() - g->pbtn_ms < MIN_PRESS_MS;   /* port: short click */
+        if (g->pbtn_down || pb_recent) pause_scale(1.05f, &px, &py, &pw, &ph);
+        spr_tl_wh(r, g1, "pausebutton", px, py, pw, ph, 255);
+    }
+
+    /* WindowGameWindow Render: m_Fade black over the whole game screen (the song's fade-in) */
+    if (g->fade > 0.0f) {
+        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(r, 0, 0, 0, a255(g->fade));
+        SDL_RenderFillRect(r, NULL);
+    }
 
     if (g->paused) {
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-        /* PauseRenderFunc_Enable @0x38ff4: dim + menugradation band from y=374 */
-        SDL_SetRenderDrawColor(r, 0, 0, 0, 110);
+        /* PauseRenderFunc_Enable @0x38ff4: 30% black (GetColor 0.3,0,0,0 = alpha 77) + menugradation band from y=374 */
+        SDL_SetRenderDrawColor(r, 0, 0, 0, 77);
         SDL_RenderFillRect(r, NULL);
         const Frame *mg = atlas_find(g1, "menugradation");
         spr_tl_wh(r, g1, "menugradation", 0, 374, 640, mg ? (float)mg->r.h : 586, 255);
         static const char *labels[3] = {"RESUME", "RETRY", "MUSIC SELECT"};
         const Atlas *u1 = &as->ui1;
+        /* TouchBack / TouchRetry Render (@0x6e27e): the same m-size button as music select PLAY: base at
+           pos; pulsing face (CoordinateColor, colour = alpha = v, blend 1) at (pos.x+1, pos.y+0.5, 310, 68.5),
+           drawn 1 px left and 2 px wider; brackets on every button at (pos.x, pos.y+1) and
+           (pos.x+1+271*s, pos.y+1); all rects scaled 1.05x about their centre while pressed. The face
+           counter steps every 51 ms of wall time (15 Hz at 30 fps, the CFAbsoluteTime gate in TouchRetry Render)
+           and keeps running while paused. */
+        Uint8 v = pause_pulse(SDL_GetTicks() / 67u);
         for (int i = 0; i < 3; i++) {
-            float x = 164, y = k_pause_y[i];
-            spr_tl(r, u1, "menubutton_m_base", x, y, 255);
-            spr_tl(r, u1, "menubutton_m_off", x + 7, y + 7, 255);
-            font_draw(r, labels[i], x + 162, y + 26, 3.2f, (SDL_Color){255, 255, 255, 255}, 0);
-            if (i == g->pause_focus) {
-                spr_tl(r, u1, "parenthesis_00", x + 8, y + 7, 255);
-                spr_tl(r, u1, "parenthesis_01", x + 324 - 8 - 39, y + 7, 255);
-            }
+            float y = k_pause_y[i];
+            bool lg = g->pause_press < 0 && g->pause_lg_until && (Sint32)(g->pause_lg_until - SDL_GetTicks()) > 0 &&
+                      i == g->pause_lg;   /* port: quick click (TouchRetry Render @0x69f0c: m_TouchDownIdx >= 0) */
+            bool down = i == g->pause_press || lg || (g->pause_kbd && i == g->pause_focus);
+            float s = down ? 1.05f : 1.0f;
+            float bx = 164, by = y, bw = 324, bh = 82;
+            float fx = 165, fy = y + 0.5f, fw = 310, fh = 68.5f;
+            float px = 165, py = y + 1, pw = 39, ph = 68;
+            pause_scale(s, &bx, &by, &bw, &bh);
+            pause_scale(s, &fx, &fy, &fw, &fh);
+            pause_scale(s, &px, &py, &pw, &ph);
+            if (down) px -= 7;
+            spr_tl_wh(r, u1, "menubutton_m_base", bx, by, bw, bh, 255);
+            SDL_SetTextureColorMod(u1->tex, v, v, v);
+            spr_tl_wh(r, u1, down ? "menubutton_m_on" : "menubutton_m_off", fx - 1, fy, fw + 2, fh, v);
+            SDL_SetTextureColorMod(u1->tex, 255, 255, 255);
+            font_draw(r, labels[i], 326, y + 40 - 18 * s, 3.25f * s, (SDL_Color){255, 255, 255, 255}, 0);
+            spr_tl_wh(r, u1, "parenthesis_00", px - 1, py, pw, ph, 255);
+            spr_tl_wh(r, u1, "parenthesis_01", px + 271 * s, py, pw, ph, 255);
         }
+        /* TouchInputTiming Render @0x7d7a0: "INPUT TIMING" (28 pt, centred, m_Pos.y - 58; capitals ~6 px
+           lower), inputbar at (100, m_Pos.y), inputcursor at (285 - 20.4 * timing, m_Pos.y - 19) */
+        font_draw(r, "INPUT TIMING", 320, 843, 2.6f, (SDL_Color){255, 255, 255, 255}, 0);
+        spr_tl(r, g1, "inputbar", 100, 895, 255);
+        spr_tl(r, g1, "inputcursor", 285.0f - 20.4f * (float)g->opt->input_timing, 876, 255);
     }
 }
 
@@ -1090,6 +1645,8 @@ void game_result(const Game *g, GameResult *o) {
     o->interlude_hits = g->interlude_cnt;
     o->total_interlude = g->total_interlude;
     o->game_over = g->game_over;
+    memcpy(o->flick_total, g->flick_total, sizeof o->flick_total);
+    memcpy(o->flick_success, g->flick_success, sizeof o->flick_success);
     if (g->retry) { o->rank = -2; return; }   /* RETRY: restart the same song */
     if (g->opt->pv_mode) { o->rank = g->quit ? -1 : -3; return; }   /* PV view: no result screen */
     if (g->quit) { o->rank = -1; return; }

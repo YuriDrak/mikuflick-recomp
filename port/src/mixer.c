@@ -10,6 +10,7 @@
 #include "mf.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define MAX_VOICES 24
@@ -19,6 +20,7 @@ typedef struct {
     size_t pos;
     float gain;
     bool loop, active;
+    bool bgm;                           /* menu BGM / preview: BGM master instead of SE master */
 } Voice;
 
 static struct {
@@ -31,6 +33,7 @@ static struct {
     float main_gain, sub_gain;          /* targets */
     float cur_main, cur_sub;            /* ramped */
     float music_master, sfx_master;
+    float bgm_master;                   /* menu BGM and previews (StatusData GetBGMVolume) */
     /* clock */
     size_t cb_pos;                      /* music pos at start of last callback */
     Uint64 cb_counter;
@@ -77,7 +80,7 @@ static void callback(void *ud, Uint8 *stream, int bytes) {
     for (int v = 0; v < MAX_VOICES; v++) {
         Voice *vo = &M.voices[v];
         if (!vo->active || !vo->pcm || !vo->pcm->frames) continue;
-        float g = vo->gain * M.sfx_master;
+        float g = vo->gain * (vo->bgm ? M.bgm_master : M.sfx_master);
         for (int i = 0; i < frames; i++) {
             if (vo->pos >= vo->pcm->frames) {
                 if (vo->loop) vo->pos = 0;
@@ -97,7 +100,8 @@ static void callback(void *ud, Uint8 *stream, int bytes) {
 
 bool mixer_init(void) {
     memset(&M, 0, sizeof M);
-    M.music_master = M.sfx_master = 1.0f;
+    M.music_master = M.bgm_master = 1.0f;
+    M.sfx_master = 0.75f;
     SDL_AudioSpec want = {0}, have;
     want.freq = AUDIO_RATE;
     want.format = AUDIO_S16SYS;
@@ -107,6 +111,13 @@ bool mixer_init(void) {
 #else
     want.samples = 1024;
 #endif
+    /* MIKUFLICK_AUDIO_BUFFER=N (power of two, 256..8192): a larger buffer if the output crackles
+       under system load; the audio clock already accounts for the granted size */
+    const char *eb = getenv("MIKUFLICK_AUDIO_BUFFER");
+    if (eb) {
+        int n = atoi(eb);
+        if (n >= 256 && n <= 8192 && !(n & (n - 1))) want.samples = (Uint16)n;
+    }
     want.callback = callback;
     M.dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (!M.dev) { log_msg("audio: %s", SDL_GetError()); return false; }
@@ -124,7 +135,7 @@ void mixer_quit(void) {
 void mixer_set_master(float music, float sfx) {
     SDL_LockAudioDevice(M.dev);
     M.music_master = music;
-    M.sfx_master = sfx;
+    M.sfx_master = sfx * 0.75f;   /* SoundManager keeps SE at 0..0.75 (slider 1.0 = 0.75) */
     SDL_UnlockAudioDevice(M.dev);
 }
 
@@ -207,26 +218,48 @@ bool mixer_music_playing(void) {
     return p;
 }
 
-int mixer_sfx_play(const Pcm *p, float gain, bool loop) {
+static int voice_play(const Pcm *p, float gain, bool loop, bool bgm) {
     if (!p || !p->frames) return -1;
     SDL_LockAudioDevice(M.dev);
     int slot = -1;
+    /* the original has one OpenAL source per sound: playing a sound again restarts it instead of
+       layering a second copy */
     for (int i = 0; i < MAX_VOICES; i++)
-        if (!M.voices[i].active) { slot = i; break; }
+        if (M.voices[i].active && M.voices[i].pcm == p) { slot = i; break; }
+    if (slot < 0)
+        for (int i = 0; i < MAX_VOICES; i++)
+            if (!M.voices[i].active) { slot = i; break; }
     if (slot < 0) { /* steal the voice closest to its end */
         size_t best = 0;
         for (int i = 0; i < MAX_VOICES; i++)
             if (!M.voices[i].loop && M.voices[i].pos >= best) { best = M.voices[i].pos; slot = i; }
     }
-    if (slot >= 0) M.voices[slot] = (Voice){p, 0, gain, loop, true};
+    if (slot >= 0) M.voices[slot] = (Voice){p, 0, gain, loop, true, bgm};
     SDL_UnlockAudioDevice(M.dev);
     return slot;
+}
+
+int mixer_sfx_play(const Pcm *p, float gain, bool loop) { return voice_play(p, gain, loop, false); }
+int mixer_bgm_play(const Pcm *p, float gain, bool loop) { return voice_play(p, gain, loop, true); }
+
+void mixer_set_bgm(float bgm) {
+    SDL_LockAudioDevice(M.dev);
+    M.bgm_master = bgm;
+    SDL_UnlockAudioDevice(M.dev);
 }
 
 void mixer_sfx_stop(int v) {
     if (v < 0 || v >= MAX_VOICES) return;
     SDL_LockAudioDevice(M.dev);
     M.voices[v].active = false;
+    SDL_UnlockAudioDevice(M.dev);
+}
+
+/* SoundBase FadeExec sets the source gain each frame (ending.c: the BGM04 fade) */
+void mixer_voice_gain(int v, const Pcm *p, float gain) {
+    if (v < 0 || v >= MAX_VOICES) return;
+    SDL_LockAudioDevice(M.dev);
+    if (M.voices[v].active && M.voices[v].pcm == p) M.voices[v].gain = gain < 0 ? 0 : gain;
     SDL_UnlockAudioDevice(M.dev);
 }
 

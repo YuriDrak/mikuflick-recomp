@@ -22,7 +22,7 @@ bool gamedata_load(GameData *gd, const char *path) {
     char *text = read_file(path, NULL);
     if (!text) { log_msg("cannot read %s (run `make setup IPA=...` first)", path); return false; }
 
-    int nkana = 0, nboard = 0, nsound = 0, ok_tables = 0, nguide = 0;
+    int nkana = 0, nboard = 0, nsound = 0, ok_tables = 0, nguide = 0, nending = 0;
     char *save = NULL;
     for (char *line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
         if (line[0] == '#' || !line[0]) continue;
@@ -74,6 +74,15 @@ bool gamedata_load(GameData *gd, const char *path) {
             ok_tables += read_ints(line + 8, gd->tension, 6) == 6;
         } else if (!strncmp(line, "endofs ", 7)) {
             ok_tables += read_ints(line + 7, gd->endofs, 5) == 5;
+        } else if (!strncmp(line, "ending ", 7)) {   /* optional: s_tbl_Ending (ending.c) */
+            int idx, size, gap, n = 0;
+            if (sscanf(line + 7, "%d %d %d%n", &idx, &size, &gap, &n) == 3 && idx >= 0 && idx < ENDING_LINES &&
+                line[7 + n] == ' ') {
+                snprintf(gd->ending_text[idx], sizeof gd->ending_text[idx], "%s", line + 8 + n);
+                gd->ending_size[idx] = size;
+                gd->ending_gap[idx] = gap;
+                nending++;
+            }
         } else if (!strncmp(line, "sound ", 6)) {
             int idx, loop;
             char name[64];
@@ -85,6 +94,8 @@ bool gamedata_load(GameData *gd, const char *path) {
         }
     }
     free(text);
+    gd->nending = nending == ENDING_LINES ? ENDING_LINES : 0;   /* all rows or none (older gamedata.txt) */
+    if (gd->nending == 0) log_msg("%s has no ending credits (rerun make setup for the OPTIONS ENDING button)", path);
     if (gd->nsongs == 0 || nkana != NUM_KANA || nboard != NUM_KEYS || nguide != NUM_KEYS || ok_tables != 7 || nsound != NUM_SOUNDS) {
         log_msg("%s is incomplete or outdated, rerun make setup (songs %d, kana %d, keys %d, tables %d, sounds %d)", path, gd->nsongs, nkana,
                 nboard, ok_tables, nsound);

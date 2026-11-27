@@ -9,6 +9,7 @@
 
 void save_load(SaveData *s, const char *dir) {
     memset(s, 0, sizeof *s);
+    s->opt.pause_button = true;   /* saves written before DISPLAY PAUSE existed */
     for (int i = 0; i < MAX_SONGS; i++)
         for (int d = 0; d < NUM_DIFF; d++) s->rec[i][d].rank = -1;
     if (mkdir(dir, 0755) != 0 && errno != EEXIST) log_msg("cannot create %s", dir);
@@ -16,6 +17,8 @@ void save_load(SaveData *s, const char *dir) {
     FILE *f = fopen(s->path, "r");
     if (!f) return;
     char line[256];
+    int legacy_timing = 0;
+    bool has_timing = false;
     while (fgets(line, sizeof line, f)) {
         int song, diff, score, rank, combo, cleared;
         char key[32];
@@ -23,20 +26,27 @@ void save_load(SaveData *s, const char *dir) {
         if (sscanf(line, "rec %d %d %d %d %d %d", &song, &diff, &score, &rank, &combo, &cleared) == 6 && song >= 0 &&
             song < MAX_SONGS && diff >= 0 && diff < NUM_DIFF)
             s->rec[song][diff] = (Record){score, rank, combo, cleared};
-        else if (sscanf(line, "opt %31s %f", key, &fv) == 2) {
+        else if (sscanf(line, "timing %d %d", &song, &score) == 2 && song >= 0 && song < MAX_SONGS) {
+            s->timing[song] = score < -10 ? -10 : score > 10 ? 10 : score;
+            has_timing = true;
+        } else if (sscanf(line, "opt %31s %f", key, &fv) == 2) {
             Options *o = &s->opt;
             s->has_opt = true;
             if (!strcmp(key, "bgm_volume")) o->bgm_volume = fv;
             else if (!strcmp(key, "se_volume")) o->se_volume = fv;
             else if (!strcmp(key, "fail_sound")) o->fail_sound = fv != 0;
-            else if (!strcmp(key, "input_timing")) o->input_timing = (int)fv;
+            else if (!strcmp(key, "input_timing")) legacy_timing = (int)fv;   /* older saves: one value for all songs */
             else if (!strcmp(key, "left_hand")) o->left_hand = fv != 0;
-            else if (!strcmp(key, "keyboard")) o->keyboard = (int)fv;
+            else if (!strcmp(key, "keyboard")) o->keyboard = fv >= 0 && fv <= 2 ? (int)fv : 0;
             else if (!strcmp(key, "flower")) o->flower = fv != 0;
             else if (!strcmp(key, "guide_panel")) o->guide_panel = fv != 0;
+            else if (!strcmp(key, "pause_button")) o->pause_button = fv != 0;
         }
+        records_load_line(s, line);   /* RECORDS: recx / flk lines */
     }
     fclose(f);
+    if (!has_timing && legacy_timing)
+        for (int i = 0; i < MAX_SONGS; i++) s->timing[i] = legacy_timing < -10 ? -10 : legacy_timing > 10 ? 10 : legacy_timing;
 }
 
 void save_write(const SaveData *s) {
@@ -47,10 +57,10 @@ void save_write(const SaveData *s) {
     fprintf(f, "# mikuflick port save: rec song diff score best_rank max_combo cleared\n");
     if (s->has_opt) {
         const Options *o = &s->opt;
-        fprintf(f, "opt bgm_volume %.2f\nopt se_volume %.2f\nopt fail_sound %d\nopt input_timing %d\n", o->bgm_volume,
-                o->se_volume, o->fail_sound, o->input_timing);
-        fprintf(f, "opt left_hand %d\nopt keyboard %d\nopt flower %d\nopt guide_panel %d\n", o->left_hand, o->keyboard,
-                o->flower, o->guide_panel);
+        fprintf(f, "opt bgm_volume %.4f\nopt se_volume %.4f\nopt fail_sound %d\n", o->bgm_volume, o->se_volume,
+                o->fail_sound);
+        fprintf(f, "opt left_hand %d\nopt keyboard %d\nopt flower %d\nopt guide_panel %d\nopt pause_button %d\n",
+                o->left_hand, o->keyboard, o->flower, o->guide_panel, o->pause_button);
     }
     for (int i = 0; i < MAX_SONGS; i++)
         for (int d = 0; d < NUM_DIFF; d++) {
@@ -58,6 +68,9 @@ void save_write(const SaveData *s) {
             if (r->score || r->rank >= 0)
                 fprintf(f, "rec %d %d %d %d %d %d\n", i, d, r->score, r->rank, r->combo, r->cleared);
         }
+    records_save_lines(s, f);   /* RECORDS */
+    for (int i = 0; i < MAX_SONGS; i++)
+        if (s->timing[i]) fprintf(f, "timing %d %d\n", i, s->timing[i]);
     fclose(f);
     if (rename(tmp, s->path) != 0) log_msg("cannot replace %s", s->path);
 }

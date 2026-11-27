@@ -16,12 +16,18 @@ make -C port setup IPA="/path/to/com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa"
 
 Without `unzip`, the game can import the IPA itself: `./port/mikuflick --import-ipa your.ipa --import-to DIR` (the same code as the Android app's IMPORT IPA button, `src/ipa.c`) writes only the files the game loads to `DIR/MikuFlick2.app` plus `DIR/gamedata.txt`, with CRC checks; run with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
 
+**Updating an existing install:** rerun `make -C port setup` (or re-import the IPA) once. `gamedata.txt` now also carries the ending credits read from the binary; with an older file the game still runs but hides the ENDING button on OPTIONS → CREDITS (and logs a hint). An older in-app import also lacks the `Localizable.strings` files that the help pages and option subtitles are read from.
+
 ## Run (from the project root)
 
 ```sh
 ./port/mikuflick
 ```
-Options: `--app DIR` (extracted `MikuFlick2.app`), `--gamedata FILE` (tables from `mfextract`; default `port/data/gamedata.txt`), `--data DIR` (save dir, default `~/.local/share/mikuflick-port`), `--song N --diff D` (jump straight into a song; diff 0 Easy … 3 Extreme, 4 Break the Limit), `--offset N` (input-timing calibration, same units as the original option), `--volume F`, `--se-volume F`, `--no-fail-sound`, `--font PATH` (menu font; `none` = built-in bitmap font), `--fullscreen`, `--window WxH`. F11 toggles fullscreen. `--import-ipa FILE [--import-to DIR]` imports your IPA in place of `setup` and exits (see above).
+Options: `--app DIR` (extracted `MikuFlick2.app`), `--gamedata FILE` (tables from `mfextract`; default `port/data/gamedata.txt`), `--data DIR` (save dir, default `~/.local/share/mikuflick-port`), `--song N --diff D` (jump straight into a song; diff 0 Easy … 3 Extreme, 4 Break the Limit), `--offset N` (input-timing steps −10…+10, the original's INPUT TIMING units; overrides the per-song value for this session and is not saved), `--volume F`, `--se-volume F`, `--no-fail-sound`, `--font PATH` (menu font; `none` = built-in bitmap font), `--fullscreen`, `--window WxH`. F11 toggles fullscreen. `--import-ipa FILE [--import-to DIR]` imports your IPA in place of `setup` and exits (see above).
+
+Environment variables:
+- `MIKUFLICK_AUDIO_BUFFER=N`: audio buffer size in frames, a power of two from 256 to 8192 (default 1024; 512 on Android). Use a larger value if the desktop output crackles under system load; the audio clock accounts for the size.
+- `MIKUFLICK_LANG=ja|en`: language of the help pages and option subtitles. By default it follows the system locale, as the original does (Japanese only when the first preferred language is Japanese). The port's other UI text is English either way.
 
 ## Controls
 
@@ -31,10 +37,26 @@ Options: `--app DIR` (extracted `MikuFlick2.app`), `--gamedata FILE` (tables fro
 | Flick direction | drag ≥ 16 pt (32 px at 640×960) | hold an **arrow key** while releasing the letter key |
 | Interlude (♪ panel) | tap the panel | any board key |
 | Pause menu | pause button (bottom right) | `Esc` / `P`, then `Up`/`Down` + `Enter`: RESUME, RETRY or MUSIC SELECT (mouse: click the buttons) |
+| INPUT TIMING (in the pause menu, saved per song) | drag the bar: 20 px per step, left = later (+), right = earlier (−) | `Left` / `Right` while paused |
 
 The note is judged **when you release**, as in the original. Timing is measured at both press and release, so press and release on the beat.
 
-Menus: the SEGA / Crypton / CRI logos can be skipped with a click or `Enter`. On the title, click or press `Enter` at "Touch to Start" to open the menu (`Up`/`Down` + `Enter`, or click). RHYTHM GAME, PV and OPTIONS work; SHOP is shown but not ported. OPTIONS: `Up`/`Down` + `Enter` to open a page, `Left`/`Right` to change a value, `Esc` back; settings are saved. PV select: `Left`/`Right` song, `Up`/`Down` + `Space` toggle LOOP/SHUFFLE/LYRICS/KARAOKE (or click the icons), `Enter` plays, `Esc` or a click during playback returns. In music select, `Left`/`Right` (or click/swipe the cover flow) changes song, `Up`/`Down` or a click on the row changes difficulty, MODE CHANGE toggles Break the Limit, `Enter`/PLAY starts, and `Esc` goes back. On a touchscreen a tap works wherever a click does (the first finger drives the menus; the flick board takes every finger). The Android build is described in `../android/README.md`.
+Menus (on a touchscreen a tap works wherever a click does; the first finger drives the menus and the flick board takes every finger; Android Back = `Esc`):
+
+| Screen | Mouse / touch | Keyboard |
+|---|---|---|
+| Logos / title | click to skip a logo, click "Touch to Start", then a menu button. RHYTHM GAME, PV and OPTIONS work; SHOP only plays its sound. The crown (bottom left) opens RESULTS | `Enter`; menu `Up`/`Down` + `Enter`; crown `Left` or `R` |
+| Music select | drag the cover flow sideways (anywhere in the band from the song logo down to the difficulty labels; the covers themselves are not buttons), click a difficulty, MODE CHANGE toggles Break the Limit, PLAY starts, Back | `Left`/`Right` song, `Up`/`Down` difficulty, `Enter` play, `Esc` back |
+| Result | click to skip the counters; Back, PLAY AGAIN; the FLICK RESULT button (right) toggles the per-key boards; click a board to show its directions, click it again to close | `Left`/`Right`/`Tab` toggle the page, `Up`/`Down` open the previous/next board, `Enter`/`Esc` back |
+| PV select | as music select, plus the LOOP / SHUFFLE / LYRICS / KARAOKE icons | `Left`/`Right` song, `Up`/`Down` + `Space` toggle an icon, `Enter` play, `Esc` back |
+| PV playback | swipe left (further than half the screen width: 160 points = 320 px) = next PV; swipe right = previous PV, or restart the current one after its first 3 s; a plain tap does nothing. Pause button: RESUME / RETRY / MUSIC SELECT | `Right` / `Left` as the swipes; `Esc`/`P` pause and resume, `Up`/`Down` + `Enter` in the menu |
+| OPTIONS | click a page, then its controls; drag a volume bar | `Up`/`Down` + `Enter` open a page, `Left`/`Right` change a value, `Esc` back; settings are saved |
+| HELP | drag the text up/down (or the mouse wheel); the arrows at the bottom change page (10 pages, the last is the licence) | `Up`/`Down` scroll, `PgUp`/`PgDn` scroll faster, `Home`/`End`, `Left`/`Right` page |
+| CREDITS | ENDING (bottom right) plays the credits roll (about 110 s, not skippable, as in the original) and returns here | `Enter` |
+| RESULTS | RECORDS; LEADERBOARD / ACHIEVEMENTS only show that Game Center is not available; Back | `Up`/`Down` + `Enter`, `Esc` back |
+| RECORDS | swipe sideways or use the side arrows for the song, the arrows by the title for the difficulty, the FLICK RESULT button for the per-key page | `Left`/`Right` song, `Up`/`Down` difficulty, `Space`/`Tab` page, `Enter` next board on the flick page, `Esc` back |
+
+The Android build is described in `../android/README.md`.
 
 ## Display
 
@@ -54,4 +76,4 @@ Shop/DLC, Twitter, Game Center, ads, replays, the collection and PV playlist edi
 
 ## Testing aids
 
-`--autoplay` (perfect play through the game rules), `--autoplay-input` (perfect play through synthetic keyboard/mouse events), `--exit-after-song` (print a `RESULT …` line and exit), `--shot-dir DIR --shot-times 8,30` (save PNG frames), `--start-scene title|select|result|options|pv` (result shows a sample score), `--shot-ui-times 0.5,3` (PNG frames at seconds since start, any screen), `--script "9:enter,12:right"` (inject key presses: enter/esc/left/right/up/down/space). With `SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy` these run headless. The `--import-ipa` path is also used to test the Android importer on a desktop.
+`--autoplay` (perfect play through the game rules), `--autoplay-input` (perfect play through synthetic keyboard/mouse events), `--exit-after-song` (print a `RESULT …` line and exit), `--shot-dir DIR --shot-times 8,30` (save PNG frames), `--start-scene title|select|result|options|pv|credits|ending|movie|scores|records` (result shows a sample score; credits = OPTIONS → CREDITS; ending = the credits roll followed, as on a first clear, by the ending movie and 初音ミクの激唱 Extreme; movie = the ending movie alone; scores = RESULTS; records = RECORDS), `--shot-ui-times 0.5,3` (PNG frames at seconds since start, any screen), `--script "9:enter,12:right"` (inject key presses: enter/esc/left/right/up/down/space; `dX0-X1-Y` injects a pointer drag from X0 to X1 at height Y in 640×960 coordinates, a tap when X0 = X1; `mX0-Y0-X1-Y1` a real-mouse drag over 0.5 s). With `SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy` these run headless. The `--import-ipa` path is also used to test the Android importer on a desktop. Debug environment hooks: `MF_DEBUG=1` logs every judgement and the interlude start/end; `MF_TEST_HOLD="x,y,dx,dy,t0,t1"` holds a synthetic finger at (x,y) from song time t0, dragged by (dx,dy), released at t1 (for `--shot-times` captures of a pressed key).

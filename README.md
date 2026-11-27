@@ -7,11 +7,12 @@ A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for
 ## Features
 
 - Boot logos, title screen and music select with cover flow, artwork, star ratings and song previews.
-- Full rhythm gameplay: flick notes, interludes, press/release timing judgement, combo and climax bonuses, tension gauge with vocal fade, game over and the pause menu (RESUME / RETRY / MUSIC SELECT).
-- OPTIONS screen (display guides, input timing, volumes, fail sound, handedness, keyboard style, help, credits; saved) and the PV viewer (music videos with lyrics, KARAOKE, LOOP, SHUFFLE).
+- Full rhythm gameplay: flick notes, interludes, press/release timing judgement, combo and climax bonuses, tension gauge with vocal fade, game over and the pause menu (RESUME / RETRY / MUSIC SELECT, plus the original's per-song INPUT TIMING bar).
+- OPTIONS screen (display guides, volumes, fail sound, handedness, keyboard style, the original help pages and licence text in English or Japanese, credits with the ENDING credits roll; saved).
+- PV viewer (music videos with lyrics, KARAOKE, LOOP, SHUFFLE; swipe to the next/previous video; its own pause menu).
 - Streaming MPEG-1 video and two ADX audio tracks (vocals + backing) decoded directly from the original `.usm` files by built-in decoders (no FFmpeg needed).
-- Result screen with ranks and a persistent local save file.
-- Mouse and multi-touch flick input, a keyboard mapping, input-timing calibration, fullscreen and volume controls.
+- Result screen with ranks and the per-key FLICK RESULT page; RESULTS / RECORDS (from the title's crown) with your best score per song and difficulty; a persistent local save file.
+- Mouse and multi-touch flick input, keyboard equivalents for every screen, input-timing calibration, fullscreen and volume controls.
 - Any screen shape: the original 2:3 layout stays centred (keys exactly where they were on iOS), and the bars on tall phones or wide monitors show a blurred copy of the video or menu.
 - Android app (APK) built from the same C sources: touch, Back button, pause when the app is left. See [`android/README.md`](android/README.md).
 - Headless modes for automated verification (`--autoplay`, `--autoplay-input`, screenshot and script modes).
@@ -50,6 +51,8 @@ If you already have an extracted app bundle, you can skip the IPA argument:
 make -C port setup          # uses extracted/ipa/Payload/MikuFlick2.app
 ```
 
+**Updating from an earlier version:** run `make -C port setup` (or re-import the IPA) once more. `gamedata.txt` now also holds the ending credits read from your binary; with an older file the game still runs, but the ENDING button on OPTIONS → CREDITS stays hidden.
+
 ### Runtime options
 
 ```text
@@ -57,7 +60,7 @@ make -C port setup          # uses extracted/ipa/Payload/MikuFlick2.app
 --gamedata FILE      tables exported by mfextract (default port/data/gamedata.txt)
 --data DIR           save directory (default ~/.local/share/mikuflick-port)
 --song N --diff D    jump straight into a song (diff 0 Easy … 3 Extreme, 4 Break the Limit)
---offset N           input-timing calibration (same units as the original option)
+--offset N           input-timing steps -10..10 for this session (overrides the per-song pause-menu value)
 --volume F           music volume
 --se-volume F        sound-effect volume
 --no-fail-sound      disable the "sad" sound on a miss
@@ -70,6 +73,15 @@ make -C port setup          # uses extracted/ipa/Payload/MikuFlick2.app
 
 `--import-ipa` writes `DIR/MikuFlick2.app/` and `DIR/gamedata.txt`; start the game with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
 
+Environment variables:
+
+```text
+MIKUFLICK_AUDIO_BUFFER=N   audio buffer in frames (power of two, 256..8192; default 1024):
+                           raise it if the sound crackles under system load
+MIKUFLICK_LANG=ja|en       language of the help pages and option subtitles
+                           (default: the system language, as in the original)
+```
+
 ## Controls
 
 | Action | Mouse / touch | Keyboard |
@@ -78,6 +90,8 @@ make -C port setup          # uses extracted/ipa/Payload/MikuFlick2.app
 | Flick direction | drag ≥ 16 pt (32 px at 640×960) | hold an arrow key while releasing the letter key |
 | Interlude (♪ panel) | tap the panel | any board key |
 | Pause menu | pause button (bottom right) | `Esc` / `P`, then `Up`/`Down` + `Enter`: RESUME, RETRY or MUSIC SELECT |
+| Input timing (pause menu, per song) | drag the INPUT TIMING bar | `Left` / `Right` while paused |
+| PV playback | swipe left / right: next / previous PV (or restart); pause button | `Right` / `Left`; `Esc` pauses |
 
 Notes are judged **when you release**, as in the original. Menus are navigated with the mouse or `Up`/`Down`/`Left`/`Right` + `Enter`; `Esc` goes back. On a touchscreen, a tap works wherever a click does, and the flick board takes several fingers at once.
 
@@ -127,7 +141,7 @@ Shop/DLC, Game Center, Twitter, ads, replays, the collection and PV playlist edi
 SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy ./port/mikuflick --autoplay --exit-after-song
 ```
 
-Additional flags: `--autoplay-input`, `--shot-dir DIR --shot-times 8,30`, `--shot-ui-times 0.5,3`, `--start-scene title|select|result|options|pv`, `--script "9:enter,12:right"`. See [`port/README.md`](port/README.md).
+Additional flags: `--autoplay-input`, `--shot-dir DIR --shot-times 8,30`, `--shot-ui-times 0.5,3`, `--start-scene title|select|result|options|pv|credits|ending|movie|scores|records`, `--script "9:enter,12:right"`. See [`port/README.md`](port/README.md).
 
 ## Reverse-engineering tools
 
