@@ -17,8 +17,79 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <math.h>
 
 void game_set_highscore(Game *g, int hs);
+
+/* Scene changes (SceneManager NextScene: @0x10db8, SetFadeChange @0x11d08, Exec @0x10620, Rendering
+   @0x10a94). Every change fades over 30 frames at 30 Hz with alpha = sin(pi*cnt/30): the old scene is
+   frozen and fades out, the next scene is set up at the peak (cnt 15, ChangeScene) and fades in over
+   frames 16..30. The overlay is a black rect, or the loading screen when s_DispLoading is set for the
+   change. Touches are ignored meanwhile. The original also freezes the new scene during the fade-in;
+   the port holds a new game (black, as its own m_Fade starts at 1) but lets the menus keep ticking,
+   since ui.c would otherwise catch up the frozen half second at once. */
+typedef struct {
+    bool on, switched, loading, has_res;
+    int target;
+    Uint32 start_ms;         /* frame 0 of the fade (moved back to frame 15 after the switch) */
+    GameResult res;          /* for the result screen */
+} Transition;
+
+#define FADE_FRAMES 30
+
+/* s_DispLoading from NextScene: target mask 0x24e8 (music select 3, score 5, options 6, PV select 7,
+   record 10, shop 13) shows it; the title (1) only when coming from one of 0x20e8 (3, 5, 6, 7, 13);
+   the game (2), PV view (4), result (8), ending (9/14) and boot (0) fade through black. Port scenes:
+   SCENE_SELECT = 3, SCENE_PV = PV select (7), SCENE_OPTION = 6; the PV view is the game in pv_mode. */
+static bool shows_loading(int from, int to) {
+    if (to == SCENE_SELECT || to == SCENE_PV || to == SCENE_OPTION) return true;
+    if (to == SCENE_TITLE) return from == SCENE_SELECT || from == SCENE_PV || from == SCENE_OPTION;
+    return false;
+}
+
+static void trans_start(Transition *t, int from, int to, const GameResult *res) {
+    memset(t, 0, sizeof *t);
+    t->on = true;
+    t->target = to;
+    t->loading = shows_loading(from, to);
+    t->start_ms = SDL_GetTicks();
+    if (res) { t->res = *res; t->has_res = true; }
+}
+
+static int trans_frame(const Transition *t) {
+    int cnt = (int)((SDL_GetTicks() - t->start_ms) * 30u / 1000u);
+    return cnt > FADE_FRAMES ? FADE_FRAMES : cnt;
+}
+
+/* SceneManager RenderLoading @0x10738 (bg_tex_07), drawn over the frozen scene with the fade alpha
+   after the fade's black rect: bg_loading at (0,0); linemove (821x2) twice at y 840, x = c*w/45 - w and
+   c*w/45 with c = (c + 1) % 45 per frame; loadmiku_00 at (385,422); loadmiku_01 at (185,507), 1 px
+   taller. (Tall screens move these down; the port's scene is always 640x960.) */
+static void render_loading(SDL_Renderer *ren, const Assets *as, float a) {
+    Uint8 al = (Uint8)(255.0f * (a < 0 ? 0 : a > 1 ? 1 : a) + 0.5f);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, al);
+    SDL_RenderFillRect(ren, NULL);
+    const Atlas *l = &as->loading;
+    if (!l->tex) return;
+    spr_tl(ren, l, "bg_loading", 0, 0, al);
+    float w = spr_width(l, "linemove");
+    float x = (float)((SDL_GetTicks() * 30u / 1000u) % 45u) * w / 45.0f;
+    spr_tl(ren, l, "linemove", x - w, 840, al);
+    spr_tl(ren, l, "linemove", x, 840, al);
+    spr_tl(ren, l, "loadmiku_00", 385, 422, al);
+    const Frame *f = atlas_find(l, "loadmiku_01");
+    if (f) spr_tl_wh(ren, l, "loadmiku_01", 185, 507, (float)f->r.w, (float)f->r.h + 1, al);
+}
+
+static void render_fade(SDL_Renderer *ren, const Assets *as, const Transition *t) {
+    float a = sinf(3.14159265f * (float)trans_frame(t) / (float)FADE_FRAMES);
+    if (a <= 0.0f) return;
+    if (t->loading) { render_loading(ren, as, a); return; }
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, (Uint8)(255.0f * a + 0.5f));
+    SDL_RenderFillRect(ren, NULL);
+}
 
 /* The menus and the pause/PV controls react to the left mouse button. A touchscreen's
    first finger is turned into such mouse events (marked SDL_TOUCH_MOUSEID, in logical
@@ -28,6 +99,8 @@ static bool g_primary_down;
 
 static bool finger_to_mouse(SDL_Renderer *ren, const SDL_Event *e, SDL_Event *out) {
     if (e->type != SDL_FINGERDOWN && e->type != SDL_FINGERMOTION && e->type != SDL_FINGERUP) return false;
+    /* macOS trackpad fingers: positions on the pad, not on the screen (the pad also sends real mouse events) */
+    if (SDL_GetTouchDeviceType(e->tfinger.touchId) == SDL_TOUCH_DEVICE_INDIRECT_RELATIVE) return false;
     if (e->type == SDL_FINGERDOWN) {
         if (g_primary_down) return false;
         g_primary_down = true;
@@ -74,6 +147,36 @@ static void map_mouse(SDL_Renderer *ren, SDL_Event *e) {
         e->motion.x = (int)lx;
         e->motion.y = (int)ly;
     }
+}
+
+/* testing (--script "mX0-Y0-X1-Y1"): push what a desktop mouse sends, in window points with a non-touch
+   mouse id, so it goes through map_mouse like the real thing. Logical -> window by inverting the
+   (linear) view_window_to_logical. */
+static void script_mouse(SDL_Renderer *ren, Uint32 type, int lx, int ly) {
+    int ww = 0, wh = 0;
+    SDL_GetWindowSize(SDL_RenderGetWindow(ren), &ww, &wh);
+    float ax, ay, bx, by;
+    view_window_to_logical(ren, 0, 0, &ax, &ay);
+    view_window_to_logical(ren, (float)ww, (float)wh, &bx, &by);
+    int wx = (int)lroundf(((float)lx - ax) * (float)ww / (bx - ax)), wy = (int)lroundf(((float)ly - ay) * (float)wh / (by - ay));
+    SDL_Event ev = {0};
+    ev.type = type;
+    if (type == SDL_MOUSEMOTION) {
+        ev.motion.timestamp = SDL_GetTicks();
+        ev.motion.windowID = SDL_GetWindowID(SDL_RenderGetWindow(ren));
+        ev.motion.which = 0;
+        ev.motion.state = SDL_BUTTON_LMASK;
+        ev.motion.x = wx; ev.motion.y = wy;
+    } else {
+        ev.button.timestamp = SDL_GetTicks();
+        ev.button.windowID = SDL_GetWindowID(SDL_RenderGetWindow(ren));
+        ev.button.which = 0;
+        ev.button.button = SDL_BUTTON_LEFT;
+        ev.button.state = type == SDL_MOUSEBUTTONDOWN ? SDL_PRESSED : SDL_RELEASED;
+        ev.button.clicks = 1;
+        ev.button.x = wx; ev.button.y = wy;
+    }
+    SDL_PushEvent(&ev);
 }
 
 
@@ -339,8 +442,12 @@ int main(int argc, char **argv) {
     double ui_shot_times[32];
     int nuishots = 0, next_uishot = 0, nscript = 0, next_script = 0;
     Uint32 script_ms[64];
+    struct { bool on; int p[4]; } script_drag[64];   /* --script mouse drags (logical coords) */
+    int drag_i = -1;
+    Uint32 drag_t0 = 0;
     SDL_Keycode script_key[64];
     Uint32 prog_start = 0;
+    bool start_credits = false;   /* --start-scene credits: OPTIONS -> CREDITS page */
     int win_w = 480, win_h = 720;
 
 #ifdef __ANDROID__
@@ -386,16 +493,22 @@ int main(int argc, char **argv) {
             }
             i++;
         }
-        else if (!strcmp(a, "--script") && v) {   /* "t:key,t:key" seconds:enter/esc/left/right/up/down/space */
+        else if (!strcmp(a, "--script") && v) {   /* "t:key,t:key" seconds:enter/esc/left/right/up/down/space/dX0-X1-Y */
             for (char *s = (char *)v; *s && nscript < 64;) {
                 double tt = strtod(s, &s);
                 if (*s != ':') break;
                 s++;
-                char kn[16] = {0};
+                char kn[32] = {0};
                 int kl = 0;
-                while (*s && *s != ',' && kl < 15) kn[kl++] = *s++;
+                while (*s && *s != ',' && kl < 31) kn[kl++] = *s++;
+                int m4[4];   /* "mX0-Y0-X1-Y1": real-mouse drag over 0.5 s (a click when both points match) */
+                script_drag[nscript].on = sscanf(kn, "m%d-%d-%d-%d", &m4[0], &m4[1], &m4[2], &m4[3]) == 4;
+                if (script_drag[nscript].on) memcpy(script_drag[nscript].p, m4, sizeof m4);
                 SDL_Keycode kc = !strcmp(kn, "enter") ? SDLK_RETURN : !strcmp(kn, "esc") ? SDLK_ESCAPE : !strcmp(kn, "left") ? SDLK_LEFT
                     : !strcmp(kn, "right") ? SDLK_RIGHT : !strcmp(kn, "up") ? SDLK_UP : !strcmp(kn, "down") ? SDLK_DOWN : SDLK_SPACE;
+                int dx0, dx1, dy;   /* "dX0-X1-Y": pointer drag (a tap when X0 == X1), logical coords, packed < 0 */
+                if (sscanf(kn, "d%d-%d-%d", &dx0, &dx1, &dy) == 3)
+                    kc = (SDL_Keycode)(0x80000000u | (Uint32)(dx0 & 1023) << 20 | (Uint32)(dx1 & 1023) << 10 | (Uint32)(dy & 1023));
                 script_ms[nscript] = (Uint32)(tt * 1000); script_key[nscript++] = kc;
                 if (*s == ',') s++;
             }
@@ -410,6 +523,10 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(a, "--start-scene") && v) {
             start_scene = !strcmp(v, "select") ? SCENE_SELECT : !strcmp(v, "title") ? SCENE_TITLE : !strcmp(v, "result") ? SCENE_RESULT : !strcmp(v, "options") ? SCENE_OPTION : !strcmp(v, "pv") ? SCENE_PV : SCENE_BOOT;
+            /* ending.c: credits roll (then, as on a first clear, the movie and 激唱 Extreme), the movie alone */
+            if (!strcmp(v, "ending")) start_scene = SCENE_ENDING;
+            else if (!strcmp(v, "movie")) start_scene = SCENE_PREENDING;
+            else if (!strcmp(v, "credits")) { start_scene = SCENE_OPTION; start_credits = true; }
             i++;
         }
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) { usage(); return 0; }
@@ -444,6 +561,7 @@ int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");   /* main loop maps the first finger itself */
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+    SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");   /* macOS: the click that focuses the window counts */
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait PortraitUpsideDown");
     SDL_Window *win = SDL_CreateWindow("Miku Flick/02 (Linux port)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        win_w, win_h, SDL_WINDOW_RESIZABLE | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
@@ -462,6 +580,7 @@ int main(int argc, char **argv) {
 
     if (!mixer_init()) log_msg("continuing without audio device");
     mixer_set_master(1.0f, opt.se_volume);
+    mixer_set_bgm(opt.bgm_volume);
 
     /* SceneBoot @0xf978: bg_tex_08 splash (640x960 region, on white) while everything loads */
     {
@@ -489,7 +608,6 @@ int main(int argc, char **argv) {
     static SaveData save;
     save_load(&save, datadir);
     if (save.has_opt) {   /* options saved from the OPTIONS screen; command-line flags win */
-        if (!cli_timing) opt.input_timing = save.opt.input_timing;
         if (!cli_bgm) opt.bgm_volume = save.opt.bgm_volume;
         if (!cli_se) opt.se_volume = save.opt.se_volume;
         if (!cli_fail) opt.fail_sound = save.opt.fail_sound;
@@ -499,8 +617,10 @@ int main(int argc, char **argv) {
         opt.guide_panel = save.opt.guide_panel;
         opt.pause_button = save.opt.pause_button;
         mixer_set_master(1.0f, opt.se_volume);
+        mixer_set_bgm(opt.bgm_volume);
     }
     UiState *ui = ui_create(ren, &as, &gd, &save, &opt);
+    Ending *ending = ending_create(ren, &as, &gd, &opt);
     Game *game = NULL;
 
     int scene = SCENE_BOOT, song = 0, diff = 1;
@@ -508,22 +628,25 @@ int main(int argc, char **argv) {
     else if (start_scene == SCENE_RESULT) { /* testing: sample result screen */
         GameResult demo = {.song = 6, .diff = 1, .counts = {0, 0, 1, 0, 26, 56}, .total_notes = 83, .max_combo = 62,
                            .stage_score = 28245, .combo_score = 11000, .interlude_hits = 15, .total_interlude = 24, .rank = 3};
+        flickres_demo(&demo);   /* per-key counters for the FLICK RESULT page */
         scene = SCENE_RESULT; ui_enter(ui, scene, &demo);
+    } else if (IS_ENDING_SCENE(start_scene) || start_credits) {   /* testing: ending.c screens */
+        scene = start_scene;
+        ui_enter(ui, start_credits ? SCENE_ENDING : scene, NULL);
+        if (start_credits) ui_enter(ui, SCENE_OPTION, NULL);   /* as if back from the ending: CREDITS */
+        else ending_enter(ending, scene, SCENE_TITLE);
     } else { scene = start_scene; ui_enter(ui, scene, NULL); if (scene == SCENE_BOOT) scene = SCENE_TITLE; }
     Uint32 scene_ms = SDL_GetTicks();
     int last_scene = scene;
     int exit_code = 0;
 
+    Transition tr = {0};
     prog_start = SDL_GetTicks();
     while (scene != SCENE_QUIT) {
+        /* the game is set up behind a black screen: no loading screen on the way into a song (the
+           fade to black is already at its peak; the song's own fade-in follows) */
         if (scene == SCENE_GAME && !game) {
-            view_begin(ren);
-            SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
-            SDL_RenderClear(ren);
-            SDL_Color w = {255, 255, 255, 255};
-            font_draw(ren, "LOADING", LOGICAL_W / 2, LOGICAL_H / 2 - 20, 6, w, 0);
-            spr_draw(ren, &as.ui2, "loading", LOGICAL_W / 2, LOGICAL_H / 2 + 80, 1.0f, 255);
-            view_present(ren, NULL);
+            if (!cli_timing) opt.input_timing = save.timing[song];   /* per song, as MusicData */
             game = game_create(ren, &as, &gd, &opt, song, diff);
             if (!game) {
                 if (exit_after) { exit_code = 2; break; }
@@ -532,14 +655,43 @@ int main(int argc, char **argv) {
                 continue;
             }
             game_set_highscore(game, save.rec[song][diff].score);
+            if (tr.on) tr.start_ms = SDL_GetTicks() - FADE_FRAMES / 2 * 1000u / 30u;   /* resume at the peak */
         }
 
         /* testing: scripted key presses */
         while (next_script < nscript && SDL_GetTicks() - prog_start >= script_ms[next_script]) {
             SDL_Event ev = {0};
-            ev.type = SDL_KEYDOWN; ev.key.keysym.sym = script_key[next_script]; SDL_PushEvent(&ev);
+            Uint32 sk = (Uint32)script_key[next_script++];
+            if (script_drag[next_script - 1].on) {   /* "mX0-Y0-X1-Y1": press now, moves each frame, release at 0.5 s */
+                drag_i = next_script - 1;
+                drag_t0 = SDL_GetTicks();
+                script_mouse(ren, SDL_MOUSEBUTTONDOWN, script_drag[drag_i].p[0], script_drag[drag_i].p[1]);
+                if (script_drag[drag_i].p[0] == script_drag[drag_i].p[2] && script_drag[drag_i].p[1] == script_drag[drag_i].p[3]) {
+                    script_mouse(ren, SDL_MOUSEBUTTONUP, script_drag[drag_i].p[0], script_drag[drag_i].p[1]);
+                    drag_i = -1;   /* a quick click: press and release in the same frame */
+                }
+                continue;
+            }
+            if (sk & 0x80000000u) {   /* "dX0-X1-Y": first-finger style mouse events in logical coords */
+                int dx0 = (int)(sk >> 20 & 1023), dx1 = (int)(sk >> 10 & 1023), dy = (int)(sk & 1023);
+                ev.button.which = SDL_TOUCH_MOUSEID; ev.button.button = SDL_BUTTON_LEFT;
+                ev.type = SDL_MOUSEBUTTONDOWN; ev.button.x = dx0; ev.button.y = dy; SDL_PushEvent(&ev);
+                SDL_Event mv = {0};
+                mv.type = SDL_MOUSEMOTION; mv.motion.which = SDL_TOUCH_MOUSEID; mv.motion.state = SDL_BUTTON_LMASK;
+                mv.motion.x = dx1; mv.motion.y = dy; SDL_PushEvent(&mv);
+                ev.type = SDL_MOUSEBUTTONUP; ev.button.x = dx1; SDL_PushEvent(&ev);
+                continue;
+            }
+            ev.type = SDL_KEYDOWN; ev.key.keysym.sym = (SDL_Keycode)sk; SDL_PushEvent(&ev);
             ev.type = SDL_KEYUP; SDL_PushEvent(&ev);
-            next_script++;
+        }
+        if (drag_i >= 0) {
+            const int *p = script_drag[drag_i].p;
+            float f = (float)(SDL_GetTicks() - drag_t0) / 500.0f;
+            if (f > 1.0f) f = 1.0f;
+            int x = p[0] + (int)lroundf((float)(p[2] - p[0]) * f), y = p[1] + (int)lroundf((float)(p[3] - p[1]) * f);
+            script_mouse(ren, SDL_MOUSEMOTION, x, y);
+            if (f >= 1.0f) { script_mouse(ren, SDL_MOUSEBUTTONUP, x, y); drag_i = -1; }
         }
         SDL_Event e;
         int next = -1;
@@ -547,6 +699,7 @@ int main(int argc, char **argv) {
             if (e.type == SDL_QUIT || e.type == SDL_APP_TERMINATING) { next = SCENE_QUIT; break; }
             if (e.type == SDL_APP_WILLENTERBACKGROUND) {   /* Android/iOS: the process may be killed while away */
                 if (scene == SCENE_GAME && game) game_pause(game);
+                if (scene == SCENE_GAME && game && !cli_timing) save.timing[song] = opt.input_timing;
                 save_write(&save);
                 continue;
             }
@@ -559,26 +712,59 @@ int main(int argc, char **argv) {
             /* Android back button behaves like Esc (cancel, pause, leave the PV) */
             if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && e.key.keysym.sym == SDLK_AC_BACK)
                 e.key.keysym.sym = SDLK_ESCAPE;
+            /* macOS trackpad contacts come as fingers with SDL_MOUSE_TOUCHID in trackpad coordinates (SDL
+               cocoa isTouchFromTrackpad); the same gesture also sends the real mouse events, so drop them */
+            if ((e.type == SDL_FINGERDOWN || e.type == SDL_FINGERMOTION || e.type == SDL_FINGERUP) &&
+                e.tfinger.touchId == SDL_MOUSE_TOUCHID) continue;
             map_mouse(ren, &e);
             SDL_Event m;
             bool has_m = finger_to_mouse(ren, &e, &m);
+            if (tr.on) continue;   /* SceneManager: no touches while a scene change fades */
             if (scene == SCENE_GAME) {
                 game_event(game, &e);
                 if (has_m) game_event(game, &m);
-            } else {
+            } else if (!IS_ENDING_SCENE(scene)) {   /* WindowEnding / WindowPreEnding TouchButton:: are empty */
                 int n = ui_event(ui, &e, &song, &diff);
                 if (n >= 0) next = n;
                 if (has_m && next < 0 && (n = ui_event(ui, &m, &song, &diff)) >= 0) next = n;
             }
         }
 
-        if (scene == SCENE_GAME && next != SCENE_QUIT) {
+        if (tr.on && next != SCENE_QUIT) {
+            int cnt = trans_frame(&tr);
+            if (!tr.switched && cnt >= FADE_FRAMES / 2) {   /* ChangeScene at the peak of the fade */
+                if (tr.loading) {   /* the next scene's setup blocks: show the loading screen meanwhile */
+                    view_begin(ren);
+                    render_loading(ren, &as, 1.0f);
+                    view_present(ren, NULL);
+                }
+                if (game) { game_destroy(game); game = NULL; }
+                if (IS_ENDING_SCENE(scene)) ending_leave(ending);
+                if (tr.target == SCENE_GAME) scene = SCENE_GAME;   /* created at the top of the loop */
+                else {
+                    opt.pv_mode = false;   /* leaving the PV view (or not in it) */
+                    ui_enter(ui, tr.target, tr.has_res ? &tr.res : NULL);
+                    if (IS_ENDING_SCENE(tr.target)) ending_enter(ending, tr.target, scene);
+                    scene = tr.target;
+                }
+                tr.switched = true;
+                tr.start_ms = SDL_GetTicks() - FADE_FRAMES / 2 * 1000u / 30u;
+                continue;
+            }
+            if (tr.switched && cnt >= FADE_FRAMES) tr.on = false;
+            else if (tr.switched && IS_ENDING_SCENE(scene)) ending_update(ending, true, &song, &diff);
+            else if (tr.switched && scene != SCENE_GAME) ui_update(ui, &song, &diff);   /* see Transition */
+        } else if (scene == SCENE_GAME && next != SCENE_QUIT) {
             if (!game_update(game)) {
                 GameResult res;
                 game_result(game, &res);
-                game_destroy(game);
-                game = NULL;
+                if (!cli_timing && save.timing[song] != opt.input_timing) {   /* changed in the pause menu */
+                    save.timing[song] = opt.input_timing;
+                    save_write(&save);
+                }
                 if (exit_after) {
+                    game_destroy(game);
+                    game = NULL;
                     printf("RESULT song=%d diff=%d rank=%d score=%d stage=%d combo_bonus=%d max_combo=%d notes=%d "
                            "cool=%d fine=%d safe=%d sad=%d worst=%d interlude=%d/%d game_over=%d\n",
                            res.song, res.diff, res.rank, res.stage_score + res.combo_score, res.stage_score,
@@ -588,37 +774,37 @@ int main(int argc, char **argv) {
                     fflush(stdout);
                     break;
                 }
-                if (res.rank == -2) { scene = SCENE_GAME; continue; }   /* pause menu RETRY */
-                if (opt.pv_mode) {   /* PV view finished (-3) or left (-1) */
-                    if (res.rank == -3 && (opt.pv_loop || opt.pv_shuffle)) {
-                        if (opt.pv_shuffle && gd.nsongs > 1) { int s2; do s2 = rand() % gd.nsongs; while (s2 == song); song = s2; }
-                        scene = SCENE_GAME;
-                        continue;
-                    }
-                    opt.pv_mode = false;
-                    ui_enter(ui, SCENE_PV, NULL);
-                    scene = SCENE_PV;
-                    continue;
-                }
-                next = res.rank < 0 ? SCENE_SELECT : SCENE_RESULT;
-                ui_enter(ui, next, res.rank < 0 ? NULL : &res);
-                scene = next;
-                next = -1;
+                /* the finished game stays on screen, frozen, while it fades out (destroyed at the switch) */
+                int to;
+                if (res.rank == -2) to = SCENE_GAME;   /* pause menu RETRY: NextScene to the game again */
+                else if (opt.pv_mode) {                /* PV view left (-1), swiped/RETRY or finished (-3) */
+                    int ns = pvview_next(&opt, res.rank == -1);   /* GotoNextPV / GotoPrevPV (pvview.c) */
+                    if (ns >= 0) { game_destroy(game); game = NULL; song = ns; continue; }   /* CriManager ReLoad: in place */
+                    to = SCENE_PV;
+                } else to = res.rank < 0 ? SCENE_SELECT : SCENE_RESULT;
+                trans_start(&tr, scene, to, to == SCENE_RESULT ? &res : NULL);
             }
+        } else if (IS_ENDING_SCENE(scene) && next < 0) {
+            int n = ending_update(ending, false, &song, &diff);
+            if (n >= 0) next = n;
         } else if (next < 0) {
             int n = ui_update(ui, &song, &diff);
             if (n >= 0) next = n;
         }
 
-        if (next >= 0) {
-            if (next != SCENE_GAME && next != SCENE_QUIT) ui_enter(ui, next, NULL);
-            scene = next;
-            continue;
-        }
+        if (next == SCENE_QUIT) { scene = SCENE_QUIT; continue; }
+        if (next >= 0) trans_start(&tr, scene, next, NULL);   /* NextScene: fade, switch at the peak */
 
         view_begin(ren);
-        if (scene == SCENE_GAME && game) game_render(game);
+        /* a song that was just set up stays black until the scene change has faded in */
+        bool game_held = tr.on && tr.switched && scene == SCENE_GAME;
+        if (game_held) {
+            SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+            SDL_RenderFillRect(ren, NULL);
+        } else if (scene == SCENE_GAME && game) game_render(game);
+        else if (IS_ENDING_SCENE(scene)) ending_render(ending);
         else ui_render(ui);
+        if (tr.on) render_fade(ren, &as, &tr);
 
         /* testing aid: capture frames (game: at song times; menus: 1.5 s after entering) */
         if (shot_dir) {
@@ -628,7 +814,7 @@ int main(int argc, char **argv) {
             if (next_uishot < nuishots && run_ms >= (Uint32)(ui_shot_times[next_uishot] * 1000)) {
                 snprintf(shot, sizeof shot, "%s/ui_%05u.png", shot_dir, (unsigned)(ui_shot_times[next_uishot] * 1000));
                 next_uishot++;
-            } else if (scene == SCENE_GAME && game && next_shot < nshots && mixer_music_time() >= shot_times[next_shot])
+            } else if (scene == SCENE_GAME && game && !tr.on && next_shot < nshots && mixer_music_time() >= shot_times[next_shot])
                 snprintf(shot, sizeof shot, "%s/game_%03d.png", shot_dir, (int)shot_times[next_shot++]);
             else if (scene != SCENE_GAME && scene != ui_shot_scene && SDL_GetTicks() - scene_ms > 1500) {
                 ui_shot_scene = scene;
@@ -645,10 +831,11 @@ int main(int argc, char **argv) {
                 SDL_FreeSurface(s);
             }
         }
-        view_present(ren, (scene == SCENE_GAME && game) ? game_backdrop(game) : NULL);
+        view_present(ren, (scene == SCENE_GAME && game && !game_held) ? game_backdrop(game) : ending_backdrop(ending));
     }
 
     if (game) game_destroy(game);
+    ending_destroy(ending);
     ui_destroy(ui);
     view_quit();
     text_quit();

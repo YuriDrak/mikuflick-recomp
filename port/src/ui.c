@@ -101,7 +101,8 @@ void digits_draw(SDL_Renderer *ren, const Atlas *a, const char *prefix, long val
 
 /* ---------------------------------------------------------------- state */
 
-#define MAX_BGFX 48
+#define HOLD_MIN_MS 100   /* port: shortest time a clicked button shows its held look (3 ticks) */
+#define MAX_BGFX 128  /* ~50 alive at steady state with the double exec */
 
 /* EffectBGEffect: additive cube drifting up across the select screen */
 typedef struct { bool on; int frame; float x, y, vx, vy, sx, sy, ang, angv; } BgFx;
@@ -134,26 +135,40 @@ struct UiState {
     float fade;
     unsigned blink;
     float menu_x[4];
-    int menu_focus, menu_press, menu_flash;
+    int menu_focus, menu_press;
     /* select */
     int song, diff;
     Atlas music[8];
     bool music_loaded[8];
     Cover cov[MAX_SONGS];
-    float scr, scr_vel;          /* m_ScrPos driven by CloudSimpleSpring */
-    float csr_x;                 /* m_CsrX difficulty cursor */
+    /* WindowBase scroll state (x only: the y limits are equal, so the y factor is 0) */
+    float scr;                   /* m_ScrPos.x */
+    float scr_add;               /* m_ScrAdd.x: momentum, /1.5 per tick */
+    float scr_start;             /* m_ScrStartPos.x */
+    float sw_st, sw_ed;          /* m_ScrSwipStPos.x / m_ScrSwipEdPos.x */
+    bool swiping, last_swiping;  /* m_IsScrSwipe / m_LastSwipeFlag */
+    float spr_pos, spr_tgt;      /* CloudSimpleSpring position / target */
+    int snd_wait;                /* WindowMusicSelect m_FadeSoundWait */
+    float csr_x, csr_spd;        /* m_CsrX / m_CsrSpdX difficulty cursor */
     unsigned pulse;              /* TouchMusicSelect m_Counter */
     BgFx bg[MAX_BGFX];
+    unsigned bg_timer;           /* WindowBGEffect m_Timer */
     TitleFx tfx[MAX_TITLEFX];
     unsigned tfx_timer;          /* WindowTitleFlower m_Timer */
-    bool play_pressed;
-    bool menu_kbd;               /* title menu focus brackets: only after arrow-key navigation */
-    float drag_x0;
-    bool dragging;
+    bool play_pressed, back_pressed, mode_pressed;
+    /* TouchBase touchDown/touchMoved: where the current touch went down and how far it has moved */
+    float dn_x, dn_y, dn_mx, dn_my;
+    bool dn_on;
+    Uint32 dn_ms;                /* SDL ticks of the last press */
+    /* port: a quick click keeps the held looks it had at release until dn_ms + HOLD_MIN_MS (see ui_event) */
+    Uint32 lg_until;
+    bool lg_play, lg_back, lg_mode;
+    int lg_menu, lg_opt;
+    int opt_press;               /* OPTIONS main list: the TouchCommonButton held, -1 none */
+    bool menu_kbd;              /* title menu focus brackets: only after arrow-key navigation */
     Pcm preview;
     int preview_song;
     int preview_voice;
-    Uint32 song_changed_ms;
     int bgm_voice;
     /* options */
     int opt_mode, opt_row, help_page;
@@ -161,12 +176,30 @@ struct UiState {
     /* PV viewer */
     int pv_focus;
     bool pv_lyrics, pv_karaoke, pv_loop, pv_shuffle;
-    /* result */
+    /* AUDIO page: volume meter being dragged (0 BGM, 1 SE, -1 none) and the last pointer x */
+    int vol_drag;
+    float vol_x;
+    /* result (WindowResult m_State / m_ModeCnt / m_NowCounterIndex, WindowCounter) */
     GameResult res;
     bool new_record;
+    int res_state, res_cnt, res_idx;
+    int res_val[11];             /* counter values in CheckCounter order */
+    int res_ctr[11];             /* ticks since each counter was activated */
+    float res_fail_rate, res_rec_rate;   /* m_FailSizeRate / m_HighScoreSizeRate */
+    int res_roll_voice;          /* looped SE04v2 while a counter rolls */
+    FlickRes fres;               /* FLICK RESULT page (flickresult.c) */
 };
 
 static const SDL_Color WHITE = {255, 255, 255, 255};
+
+/* sound table indices (Sound.plist order, see docs/re_notes.md): the menus only use these */
+enum {
+    SE_BUTTON = 19,   /* SE02_01: every Touch* touchUp released inside the button */
+    SE_BACK = 8,      /* SE09: TouchBack touchUp @0x6ee74 */
+    SE_COVER = 15,    /* MusicSelect: WindowMusicSelect updateTitle:: @0x401da */
+    SE_RECORD = 21,   /* SE05_01: WindowResult setHighScoreMode */
+    SE_COUNT = 29,    /* SE04v2 (loop): WindowCounter Active @0x35db0 */
+};
 
 UiState *ui_create(SDL_Renderer *ren, Assets *as, const GameData *gd, SaveData *save, Options *opt) {
     UiState *u = calloc(1, sizeof *u);
@@ -184,7 +217,15 @@ UiState *ui_create(SDL_Renderer *ren, Assets *as, const GameData *gd, SaveData *
     u->pv_focus = 1;
     u->menu_focus = 0;
     u->menu_press = -1;
+    u->opt_press = -1;
+    u->vol_drag = -1;
+    u->res_roll_voice = -1;
     return u;
+}
+
+static void stop_roll(UiState *u) {
+    if (u->res_roll_voice >= 0) mixer_sfx_stop(u->res_roll_voice);
+    u->res_roll_voice = -1;
 }
 
 static void stop_preview(UiState *u) {
@@ -197,6 +238,13 @@ static void stop_preview(UiState *u) {
 static void stop_bgm(UiState *u) {
     if (u->bgm_voice >= 0) mixer_sfx_stop(u->bgm_voice);
     u->bgm_voice = -1;
+}
+
+/* Menu BGM (looped Sound.plist entry, replacing whatever BGM plays), on the mixer's BGM master
+   (Options.bgm_volume) like the original's PlayBGM */
+static void play_bgm(UiState *u, int id) {
+    stop_bgm(u);
+    u->bgm_voice = mixer_bgm_play(&u->as->sounds[id], 1.0f, true);
 }
 
 void ui_destroy(UiState *u) {
@@ -265,14 +313,25 @@ static void covers_snap(UiState *u) {
         Cover *c = &u->cov[i];
         c->x = c->tx; c->lx = c->tlx; c->ly = c->tly; c->rx = c->trx; c->ry = c->try_;
     }
-    u->scr = (float)u->song * 40.0f;
-    u->scr_vel = 0;
+    u->scr = u->spr_pos = u->spr_tgt = (float)u->song * 40.0f;
+    u->scr_add = 0;
+    u->swiping = u->last_swiping = false;
     u->csr_x = csr_target(u->diff);
+    u->csr_spd = 0;
+}
+
+/* WindowMusicSelect setDifficulty:: @0x3fd62: the cursor starts at a third of the distance per tick and
+   slows by 0.9 each tick (exec @0x413f6), stopping on the target */
+static void set_difficulty(UiState *u, int d) {
+    u->diff = d;
+    /* Break the Limit draws its own wide cursor; m_CsrX stays where it was */
+    u->csr_spd = d == DIFF_BREAK ? 0.0f : (csr_target(d) - u->csr_x) / 3.0f;
 }
 
 /* TouchHelper CoordinateColor mode 0 @0x6c7e0: the button faces pulse with colour = alpha = v, v going
-   0.85 * 0.98^i down for i = 0..10 and back up (22 steps); m_Counter advances once per tick and wraps
-   after 21 (TouchTitleMenus / TouchMusicSelect exec) */
+   0.85 * 0.98^i down for i = 0..10 and back up (22 steps); m_Counter wraps after 21 and only advances
+   when >= 51 ms have passed since its last step (TouchTitleMenus / TouchMusicSelect exec), i.e. every
+   second 30 Hz tick: callers pass ticks / 2 */
 static Uint8 pulse_level(unsigned counter) {
     int i = (int)(counter % 22);
     if (i > 10) i = 21 - i;
@@ -290,7 +349,7 @@ static void spawn_bgfx(UiState *u) {
         if (b->on) continue;
         /* EffectBGEffect initWithType:: @0xbff4 */
         b->on = true;
-        b->frame = rand() % 5;
+        b->frame = 3 + rand() % 2;   /* pattern {7, 8} -> bgeffect_03 / bgeffect_04 */
         b->x = (float)(rand() % (LOGICAL_W - 100) + 50);
         b->y = (float)(LOGICAL_H + 100);
         b->vx = (float)(rand() % 100) / 100.0f - 0.5f;
@@ -303,28 +362,12 @@ static void spawn_bgfx(UiState *u) {
     }
 }
 
-/* one 30 Hz tick of WindowMusicSelect / WindowCover / WindowBGEffect exec */
-static void select_tick(UiState *u) {
-    /* CloudSimpleSpring toward index*40 */
-    float target = (float)u->song * 40.0f;
-    u->scr_vel = u->scr_vel * 0.55f + (target - u->scr) * 0.22f;
-    u->scr += u->scr_vel;
-    if (fabsf(target - u->scr) < 0.05f && fabsf(u->scr_vel) < 0.05f) { u->scr = target; u->scr_vel = 0; }
-    /* WindowCover exec @0x36110: 15 % per tick toward the targets while the timer runs */
-    for (int i = 0; i < u->gd->nsongs; i++) {
-        Cover *c = &u->cov[i];
-        if (c->timer <= 0) continue;
-        if (--c->timer == 0) { c->x = c->tx; c->lx = c->tlx; c->ly = c->tly; c->rx = c->trx; c->ry = c->try_; continue; }
-        c->x += (c->tx - c->x) * 0.15f;
-        c->lx += (c->tlx - c->lx) * 0.15f; c->ly += (c->tly - c->ly) * 0.15f;
-        c->rx += (c->trx - c->rx) * 0.15f; c->ry += (c->try_ - c->ry) * 0.15f;
-    }
-    /* difficulty cursor m_CsrX glides to its target (speed *0.9 per tick in the original) */
-    float ctx = csr_target(u->diff);
-    u->csr_x += (ctx - u->csr_x) * 0.35f;
-    u->pulse++;
-    /* WindowBGEffect exec: 3 cubes every 100 ticks */
-    if (u->ticks % 100 == 1) for (int k = 0; k < 3; k++) spawn_bgfx(u);
+/* one WindowBGEffect exec: 3 new cubes whenever ++m_Timer is a multiple of 100, then move and rotate.
+   WindowBGEffect is a WindowBase child window, so it is exec'd twice per frame on the music select,
+   PV select and options screens (WindowManager AddObject @0x33210 plus the parent's [super exec]
+   child loop); WindowResult does not call [super exec], so it runs once there. */
+static void bgfx_exec(UiState *u) {
+    if (++u->bg_timer % 100 == 0) for (int k = 0; k < 3; k++) spawn_bgfx(u);
     for (int i = 0; i < MAX_BGFX; i++) {
         BgFx *b = &u->bg[i];
         if (!b->on) continue;
@@ -333,6 +376,139 @@ static void select_tick(UiState *u) {
         b->ang += 0.005984f * b->angv; /* _RotSpeed */
         if (b->x < -50 || b->x > LOGICAL_W + 50 || b->y < -50) b->on = false;
     }
+}
+
+/* fresh cube field for a scene: empty, as in the original (the first wave comes at exec 100) */
+static void bgfx_reset(UiState *u) {
+    memset(u->bg, 0, sizeof u->bg);
+    u->bg_timer = 0;
+}
+
+/* EffectBGEffect render: RenderTexRot, additive, colour GetColor(0.1, 1, 1, 1) (alpha 0.1 = 26/255),
+   drawn at half size (half width/height passed to the same call the title flowers use) */
+static void render_bgfx(UiState *u) {
+    const Atlas *u1 = &u->as->ui1;
+    SDL_SetTextureBlendMode(u1->tex, SDL_BLENDMODE_ADD);
+    for (int i = 0; i < MAX_BGFX; i++) {
+        BgFx *b = &u->bg[i];
+        if (!b->on) continue;
+        char name[32];
+        snprintf(name, sizeof name, "bgeffect_%02d", b->frame);
+        spr_rot(u->ren, u1, name, b->x, b->y, b->ang * 57.29578f, 0.5f, 26);
+    }
+    SDL_SetTextureBlendMode(u1->tex, SDL_BLENDMODE_BLEND);
+}
+
+/* WindowMusicSelect updateTitle:: @0x4017c: new centre cover. SE 15, the preview stops at once and a
+   new one starts after m_FadeSoundWait = 10 ticks; a running wait is not restarted, so scrolling on
+   plays whatever is centred when it runs out. */
+static void update_title(UiState *u, int idx) {
+    u->song = idx;
+    covers_retarget(u, 35);
+    play_sound(u->as, SE_COVER);
+    stop_preview(u);
+    if (u->snd_wait == 0) u->snd_wait = 10;
+}
+
+/* WindowMusicSelect updateSound @0x400b4: play the centred song's preview when the wait runs out, at
+   the BGM volume, looped, without a fade */
+static void update_sound(UiState *u) {
+    if (u->snd_wait <= 0 || --u->snd_wait > 0) return;
+    stop_preview(u);
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s.adx", u->as->appdir, u->gd->songs[u->song].preview);
+    if (media_decode_audio(path, &u->preview, 1) >= 1) u->preview_voice = mixer_bgm_play(&u->preview, 1.0f, true);
+    u->preview_song = u->song;
+}
+
+/* WindowBase ScrollSetTouchArea:::: min (0,140) max (640,400) (r2,r3 / [sp],[sp+4] @0x34174), set in
+   WindowMusicSelect loadTexture @0x41128 and WindowPVSelect loadTexture @0x45fea. ScrollTouchDown/Moved
+   compare it with the raw touch, which is in UIKit points (320x480: locationInView + CloudMath::AdjustPoint
+   @0x578a8, which only halves on iPad HD; every TouchBase collision rect is pos * 0.5 / frame size / 2,
+   e.g. TouchBack init @0x6deb4, TouchSoundVolume @0x76f72). In the 640x960 scene the band is y 280..800
+   across the whole width: the jackets (y 293..609), their reflection, the strip below and the top of the
+   difficulty labels. The port passes touches here in points (logical px * 0.5). */
+static bool in_scroll_area(float x, float y) { return x >= 0 && x <= 640 && y >= 140 && y <= 400; }
+
+/* WindowBase ScrollTouchDown: / ScrollTouchMoved: / ScrollTouchUp: @0x344c8 / 0x345a4 / 0x3469c;
+   sw_st / sw_ed are in points like the original's m_ScrSwipStPos / m_ScrSwipEdPos */
+static void scroll_touch(UiState *u, const SDL_Event *e) {
+    if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT) {
+        float x = (float)e->button.x * 0.5f, y = (float)e->button.y * 0.5f;
+        if (!in_scroll_area(x, y)) { u->swiping = false; return; }
+        u->swiping = true;
+        u->scr_start = u->scr;
+        u->sw_st = u->sw_ed = x;
+    } else if (e->type == SDL_MOUSEMOTION && (e->motion.state & SDL_BUTTON_LMASK)) {
+        float x = (float)e->motion.x * 0.5f, y = (float)e->motion.y * 0.5f;
+        if (!in_scroll_area(x, y)) { u->swiping = false; return; }
+        if (!u->swiping) { u->scr_start = u->scr; u->sw_st = x; }
+        u->swiping = true;
+        u->sw_ed = x;
+    } else if ((e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT) ||
+               (e->type == SDL_MOUSEMOTION && !(e->motion.state & SDL_BUTTON_LMASK))) {
+        u->swiping = false;   /* port: a hover without the button also ends it (release lost outside the window) */
+    }
+}
+
+/* one 30 Hz tick of WindowMusicSelect exec @0x41466..0x41880 (+ its WindowCover / WindowBGEffect
+   children, which run twice per frame, see bgfx_exec) */
+static void select_tick(UiState *u) {
+    int n = u->gd->nsongs;
+    /* CloudSimpleSpring::Compute first */
+    u->spr_pos += (u->spr_tgt - u->spr_pos) * 0.5f;
+    if (n >= 2) {
+        const float lim_min = 0.0f, lim_max = (float)(n * 40);   /* loadTexture @0x41152 */
+        if (u->swiping) {
+            /* exec @0x41530: ScrPos = ScrStartPos + (St - Ed) * 1.0 (table @0x419fc) * 0.9 (@0x41788), touch in
+               points, so 0.45 scroll px per scene px: about 89 px of drag per cover (40). No dead zone: the
+               strip moves from the first motion. The centre cover changes during the drag. */
+            float prev = u->scr;
+            u->scr = u->scr_start + (u->sw_st - u->sw_ed) * 0.9f;
+            u->scr_add = u->scr - prev;
+            int idx = (int)((u->scr + 20.0f) / 40.0f);
+            if (idx < 0) idx = 0;
+            if (idx > n - 1) idx = n - 1;
+            if (idx != u->song) update_title(u, idx);
+        } else {
+            if (u->last_swiping) {   /* released: aim the spring at the nearest cover */
+                int idx = (int)((u->scr + 20.0f) / 40.0f);
+                if (idx < 0) idx = 0;
+                if (idx > n - 1) idx = n - 1;
+                u->spr_tgt = (float)idx * 40.0f;
+                u->spr_pos = u->scr;
+            }
+            float x = u->spr_pos + u->scr_add;   /* the release momentum carries on */
+            if (x < lim_min) { x += (lim_min - x) / 1.5f; if (x >= lim_min) x = lim_min; }
+            if (x > lim_max) { x += (x - lim_max) / -1.5f; if (x <= lim_max) x = lim_max; }
+            u->scr = u->spr_pos = x;
+        }
+        u->scr_add /= 1.2f;   /* exec @0x417e0: Vector2D / 1.2 (0x3f99999a); ScrollExec's 1.5 is not used here */
+        if (fabsf(u->scr_add) < 0.1f) u->scr_add = 0;
+    }
+    u->last_swiping = u->swiping;
+    update_sound(u);
+    /* difficulty cursor (exec @0x413f6) */
+    if (u->csr_spd != 0.0f) {
+        float tgt = csr_target(u->diff);
+        u->csr_x += u->csr_spd;
+        u->csr_spd *= 0.9f;
+        if ((u->csr_spd > 0 && u->csr_x >= tgt) || (u->csr_spd < 0 && u->csr_x <= tgt)) { u->csr_x = tgt; u->csr_spd = 0; }
+    }
+    u->pulse++;
+    /* WindowCover exec @0x36110 (twice per frame: WindowBase init -> AddObject, and AddChildWindow in
+       loadTexture @0x40d24): 15 % toward the targets per exec while m_StretchTimer runs */
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < n; i++) {
+            Cover *c = &u->cov[i];
+            if (c->timer <= 0) continue;
+            if (--c->timer == 0) { c->x = c->tx; c->lx = c->tlx; c->ly = c->tly; c->rx = c->trx; c->ry = c->try_; continue; }
+            c->x += (c->tx - c->x) * 0.15f;
+            c->lx += (c->tlx - c->lx) * 0.15f; c->ly += (c->tly - c->ly) * 0.15f;
+            c->rx += (c->trx - c->rx) * 0.15f; c->ry += (c->try_ - c->ry) * 0.15f;
+        }
+    bgfx_exec(u);
+    bgfx_exec(u);
 }
 
 /* ------------------------------------------------------------ title particles */
@@ -409,7 +585,6 @@ static void title_start_menu(UiState *u) {
     for (int i = 0; i < 4; i++) u->menu_x[i] = (float)(LOGICAL_W + 128 + 20 * i); /* TouchTitleMenus init */
     u->menu_focus = 0;
     u->menu_press = -1;
-    play_sound(u->as, 19); /* SE02_01 */
 }
 
 /* one 30 Hz tick of WindowTitle exec @0x50fb8 */
@@ -417,7 +592,8 @@ static void title_tick(UiState *u) {
     if (u->tstate >= 8) titlefx_tick(u);   /* WindowTitleFlower belongs to the title, not the boot logos */
     switch (u->tstate) {
     case 0:
-        if (++u->tcount == 10) play_sound(u->as, SND_SEGA);
+        /* Na_SEGA_09_keep: the original plays this voice with PlayBGM (stops other BGM, BGM volume) */
+        if (++u->tcount == 10) { stop_bgm(u); mixer_bgm_play(&u->as->sounds[SND_SEGA], 1.0f, false); }
         if (u->tcount >= 86) { u->tcount = 0; u->tstate++; }
         break;
     case 1: case 4: case 7:
@@ -438,29 +614,133 @@ static void title_tick(UiState *u) {
     case 9: case 10:
         u->tcount++;
         u->blink++;
-        if (u->bgm_voice < 0 && u->tcount > 67) u->bgm_voice = mixer_sfx_play(&u->as->sounds[SND_BGM01], 0.8f, true);
+        if (u->bgm_voice < 0 && u->tcount > 67) play_bgm(u, SND_BGM01);
         if (u->tstate == 10)
             for (int i = 0; i < 4; i++) { /* TouchTitleMenus exec: slide 100 px/tick to x = 128 */
                 u->menu_x[i] -= 100.0f;
                 if (u->menu_x[i] < 128.0f) u->menu_x[i] = 128.0f;
             }
-        if (u->menu_flash > 0) u->menu_flash--;
         break;
     }
 }
 
 static void opt_open(UiState *u, int mode);
 static void render_back_button(UiState *u);
+
+static bool in_rect(float x, float y, float rx, float ry, float rw, float rh) {
+    return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+}
+
+/* TouchBase touchDown/touchMoved/touchUp: a button fires only when the same touch went down inside it
+   and is released inside it, and a touch that moved further than the button's own size on either
+   axis is cancelled (so a swipe that ends on a button does nothing). press_track records the touch;
+   tapped() is the test on release at (mx, my). */
+static void press_track(UiState *u, const SDL_Event *e) {
+    if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT) {
+        u->dn_on = true;
+        u->dn_x = (float)e->button.x; u->dn_y = (float)e->button.y;
+        u->dn_mx = u->dn_my = 0;
+        u->dn_ms = SDL_GetTicks();
+    } else if (e->type == SDL_MOUSEMOTION && (e->motion.state & SDL_BUTTON_LMASK) && u->dn_on) {
+        u->dn_mx = fmaxf(u->dn_mx, fabsf((float)e->motion.x - u->dn_x));
+        u->dn_my = fmaxf(u->dn_my, fabsf((float)e->motion.y - u->dn_y));
+    }
+}
+
+static bool tapped(const UiState *u, float rx, float ry, float rw, float rh, float mx, float my) {
+    return u->dn_on && in_rect(u->dn_x, u->dn_y, rx, ry, rw, rh) && in_rect(mx, my, rx, ry, rw, rh) &&
+           u->dn_mx <= rw && u->dn_my <= rh;
+}
 /* hit boxes of the bottom buttons: TouchBack type 4 (17,873) 129x82, TouchMusicSelect PLAY (164,873) 324x82 */
 static bool hit_back(float mx, float my) { return mx >= 17 && mx < 146 && my >= 873 && my < 955; }
 static bool hit_play(float mx, float my) { return mx >= 164 && mx < 488 && my >= 873 && my < 955; }
+/* TouchModeChange: modechange 404x70 drawn at (118,698) */
+static bool hit_mode(float mx, float my) { return mx >= 118 && mx < 522 && my >= 698 && my < 768; }
+
+/* TouchBack: pressed while the touch that began on it is held; a release over it fires (SE 8 after
+   the callback, TouchBack touchUp @0x6ee74). Returns true when it fires. */
+static bool back_event(UiState *u, const SDL_Event *e) {
+    if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT) {
+        u->back_pressed = hit_back((float)e->button.x, (float)e->button.y);
+        return false;
+    }
+    if (e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT) {
+        u->back_pressed = false;
+        if (tapped(u, 17, 873, 129, 82, (float)e->button.x, (float)e->button.y)) { play_sound(u->as, SE_BACK); return true; }
+    }
+    return false;
+}
+
+/* WindowCounter SetValue: m_Digit = floor(log10 v) + 2 (1 for 0); digit k (k = 1 the units) rolls
+   while the counter's tick count is below 12k, so a counter with d digits settles after 12d ticks */
+static int counter_digits(int v) {
+    int d = 0;
+    for (v = v < 0 ? 0 : v; v > 0; v /= 10) d++;
+    return d;
+}
+
+static int result_rank_se(int rank) {
+    static const int k_se[7] = {13, 12, 12, 11, 11, 11, 10};   /* SE14 / SE13 / SE12 / SE11 */
+    return rank >= 0 && rank <= 6 ? k_se[rank] : -1;
+}
+
+/* WindowResult touchDown: @0x4f07c: a touch while the counters run settles them all */
+static void result_skip(UiState *u) {
+    if (u->res_idx >= 11) return;
+    stop_roll(u);
+    u->res_idx = 11;
+}
+
+/* one 30 Hz tick of WindowResult exec @0x4d6ac with its WindowCounter children (CheckCounter @0x4d5fc) */
+static void result_tick(UiState *u) {
+    bgfx_exec(u);
+    u->res_cnt++;
+    if (u->res_idx < 11) {
+        int k = u->res_idx;
+        bool done = ++u->res_ctr[k] >= 12 * counter_digits(u->res_val[k]);
+        if (done) { stop_roll(u); u->res_idx++; }
+        else if (u->res_roll_voice < 0) u->res_roll_voice = mixer_sfx_play(&u->as->sounds[SE_COUNT], 1.0f, true);
+    }
+    bool failed = u->res.rank >= 5 && u->res.diff != DIFF_BREAK;   /* m_ContentOpen == 0 */
+    switch (u->res_state) {
+    case 0:   /* counters; the rank stamp lands once they are done and 46 ticks have passed */
+        if (u->res_cnt >= 46 && u->res_idx >= 11) {
+            int se = result_rank_se(u->res.rank);
+            if (se >= 0) play_sound(u->as, se);
+            u->res_state = 1;
+            u->res_cnt = 0;
+        }
+        break;
+    case 1:   /* FAILED grows in, then a pause */
+        if (failed) u->res_fail_rate = fminf(1.0f, u->res_fail_rate + 0.2f);
+        if (u->res_cnt >= 66) { u->res_state = 2; u->res_cnt = 0; }
+        break;
+    case 2:
+        if (u->new_record) { u->res_state = 4; u->res_cnt = 0; play_sound(u->as, SE_RECORD); }   /* setHighScoreMode */
+        else u->res_state = 5;
+        break;
+    case 4:   /* NEW RECORD grows in */
+        u->res_rec_rate = fminf(1.0f, u->res_rec_rate + 0.2f);
+        if (u->res_cnt >= 46) u->res_state = 5;
+        break;
+    case 5:   /* Back / PLAY AGAIN appear */
+        u->res_state = 6;
+        break;
+    default: break;
+    }
+}
 
 void ui_enter(UiState *u, int scene, const GameResult *res) {
+    int prev_scene = u->scene;
     u->scene = scene;
+    if (IS_ENDING_SCENE(scene)) { stop_bgm(u); stop_preview(u); }   /* ending.c plays BGM04 / the movie */
     u->enter_ms = u->last_ms = SDL_GetTicks();
     u->tick_acc = 0;
     u->ticks = 0;
-    u->play_pressed = false;
+    u->play_pressed = u->back_pressed = u->mode_pressed = false;
+    u->opt_press = -1;
+    u->lg_until = 0;
+    stop_roll(u);
     if (scene == SCENE_BOOT || scene == SCENE_TITLE) {   /* new title scene: fresh WindowTitleFlower */
         memset(u->tfx, 0, sizeof u->tfx);
         u->tfx_timer = 0;
@@ -471,21 +751,38 @@ void ui_enter(UiState *u, int scene, const GameResult *res) {
     } else if (scene == SCENE_TITLE) {
         stop_preview(u);
         if (u->tstate < 9) { u->tstate = 9; u->tcount = 60; u->fade = 0; }   /* --start-scene title */
-        else title_start_menu(u);        /* back from music select: menu already open */
+        else {                           /* back from another screen: menu already open, no SE 19 */
+            title_start_menu(u);
+            play_bgm(u, SND_BGM01);      /* the title restarts BGM01 at once (@0x50e6e) */
+        }
     }
-    if (scene == SCENE_OPTION) opt_open(u, 0 /* OPT_MAIN */);
+    if (scene == SCENE_OPTION) {
+        /* WindowOption init @0x443dc: setMode (GetPrevScene == 1 ? 0 : 5): back from the ending -> CREDITS */
+        opt_open(u, prev_scene == SCENE_ENDING ? 5 /* OPT_CREDITS */ : 0 /* OPT_MAIN */);
+        bgfx_reset(u);
+        play_bgm(u, SND_BGM01 + 2);      /* OPTIONS switches to BGM03, sound #24 (@0x444be) */
+    }
     if (scene == SCENE_SELECT || scene == SCENE_PV) {
         stop_bgm(u);
-        u->song_changed_ms = SDL_GetTicks();
+        stop_preview(u);
         covers_snap(u);
-        memset(u->bg, 0, sizeof u->bg);
-        for (int k = 0; k < 6; k++) { spawn_bgfx(u); }
-        for (int i = 0; i < MAX_BGFX; i++) if (u->bg[i].on) u->bg[i].y = (float)(rand() % LOGICAL_H);
+        u->snd_wait = 10;   /* first preview after the same wait as a cover change */
+        bgfx_reset(u);
     }
     if (scene == SCENE_RESULT && res) {
         stop_preview(u);
         u->res = *res;
         u->new_record = false;
+        u->res_state = u->res_cnt = u->res_idx = 0;
+        u->res_fail_rate = u->res_rec_rate = 0;
+        flickres_reset(&u->fres);
+        /* CheckCounter order: Total Notes, Combo, COOL, FINE, SAFE, SAD, WORST, ♪, Stage, Combo Bonus, Total */
+        const int vals[11] = {res->total_notes, res->max_combo, res->counts[5], res->counts[4], res->counts[3],
+                              res->counts[2], res->counts[1], res->interlude_hits, res->stage_score,
+                              res->combo_score, res->stage_score + res->combo_score};
+        memcpy(u->res_val, vals, sizeof vals);
+        memset(u->res_ctr, 0, sizeof u->res_ctr);
+        bgfx_reset(u);
         if (res->rank >= 0) {
             Record *r = &u->save->rec[res->song][res->diff];
             int total = res->stage_score + res->combo_score;
@@ -495,30 +792,30 @@ void ui_enter(UiState *u, int scene, const GameResult *res) {
             if (res->rank <= 4) r->cleared = 1;
             save_write(u->save);
         }
-        u->bgm_voice = mixer_sfx_play(&u->as->sounds[SND_BGM01 + 2], 0.7f, true);
+        play_bgm(u, SND_BGM01 + 4);      /* result BGM is BGM05, sound #26 (@0x4bad2) */
     }
 }
 
+/* keyboard: ←/→ move the spring target one cover (no wrap, like the swipe limits); ↑/↓ difficulty */
 static void select_move(UiState *u, int ds, int dd) {
-    if (ds) {
-        int n = (u->song + ds + u->gd->nsongs) % u->gd->nsongs;
-        if (n != u->song) {
-            u->song = n;
-            covers_retarget(u, 10);
-            u->song_changed_ms = SDL_GetTicks();
-            play_sound(u->as, SND_DECIDE);
+    if (ds && !u->swiping) {
+        int n = u->song + ds;
+        if (n >= 0 && n < u->gd->nsongs) {
+            update_title(u, n);
+            u->spr_tgt = (float)n * 40.0f;
         }
     }
     if (dd) {
         int n = u->diff + dd;
-        if (n >= 0 && n < NUM_DIFF) { u->diff = n; play_sound(u->as, SND_DECIDE); }
+        if (n >= 0 && n < NUM_DIFF) { set_difficulty(u, n); play_sound(u->as, SE_BUTTON); }
     }
 }
 
 static int start_game(UiState *u, int *song, int *diff) {
     stop_preview(u);
     stop_bgm(u);
-    play_sound(u->as, SND_HIT);
+    stop_roll(u);
+    play_sound(u->as, SE_BUTTON);
     *song = u->song;
     *diff = u->diff;
     /* PV viewer playback goes through the game engine in "PV mode" */
@@ -537,6 +834,8 @@ static bool *pv_flag(UiState *u, int i) {
 }
 
 static int pv_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
+    scroll_touch(u, e);
+    if (back_event(u, e)) { stop_preview(u); return SCENE_TITLE; }
     bool click = e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT;
     if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT)
         u->play_pressed = hit_play((float)e->button.x, (float)e->button.y);
@@ -545,7 +844,7 @@ static int pv_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
     float mx = click ? (float)e->button.x : 0, my = click ? (float)e->button.y : 0;
     int toggle = -1;
     if (key) {
-        if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) { stop_preview(u); play_sound(u->as, SND_CANCEL); return SCENE_TITLE; }
+        if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) { stop_preview(u); play_sound(u->as, SE_BACK); return SCENE_TITLE; }
         if (k == SDLK_LEFT) select_move(u, -1, 0);
         if (k == SDLK_RIGHT) select_move(u, 1, 0);
         /* focus cycles LOOP, SHUFFLE, LYRICS, KARAOKE */
@@ -557,37 +856,38 @@ static int pv_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
     bool was_play = u->play_pressed;
     if (click) u->play_pressed = false;
     if (click) {
+        /* the covers only scroll (WindowCover TouchButton:: is empty): no taps on them */
         u->menu_kbd = false;
-        if (my > 293 && my < 609 && mx < 160) select_move(u, -1, 0);
-        else if (my > 293 && my < 609 && mx > 480) select_move(u, 1, 0);
-        else if (my >= 742 && my < 835 && mx >= 25) { int i = (int)((mx - 25) / 120); if (i < 5 && mx - 25 - 120 * i < 109) toggle = i; }
-        else if (hit_play(mx, my)) { if (was_play) return start_game(u, song, diff); }
-        else if (hit_back(mx, my)) { stop_preview(u); play_sound(u->as, SND_CANCEL); return SCENE_TITLE; }
+        for (int i = 0; i < 5; i++) if (tapped(u, 25 + 120.0f * i, 742, 109, 93, mx, my)) toggle = i;
+        if (was_play && tapped(u, 164, 873, 324, 82, mx, my)) return start_game(u, song, diff);
     }
     if (toggle >= 0) {
+        /* TouchPVLoopMode touchUp: SE 19; PLAYLIST editing is not ported, so that one only sounds */
         bool *f = pv_flag(u, toggle);
-        if (f) { *f = !*f; u->pv_focus = toggle; play_sound(u->as, SND_DECIDE); }
-        else play_sound(u->as, SND_CANCEL);   /* PLAYLIST editing is not ported */
+        if (f) { *f = !*f; u->pv_focus = toggle; }
+        play_sound(u->as, SE_BUTTON);
     }
     return -1;
 }
 
 /* title menu button hit test (menubutton_l_base 394x82 at (x, 538+82*i)) */
+/* TouchTitleMenus exec: a button only takes touches once it has slid in to x = 128 */
 static int menu_hit(UiState *u, float mx, float my) {
     for (int i = 0; i < 4; i++) {
         float x = u->menu_x[i], y = 538.0f + 82.0f * i;
+        if (x > 128.0f) continue;
         if (mx >= x && mx < x + 394 && my >= y && my < y + 82) return i;
     }
     return -1;
 }
 
+/* TouchTitleMenus touchUp: SE 19 for every button, SHOP included */
 static int menu_activate(UiState *u, int i) {
-    if (i == 0) { play_sound(u->as, SND_HIT); return SCENE_SELECT; }   /* RHYTHM GAME */
-    if (i == 1) { play_sound(u->as, SND_HIT); return SCENE_PV; }       /* PV */
-    if (i == 2) { play_sound(u->as, SND_HIT); return SCENE_OPTION; }   /* OPTIONS */
-    play_sound(u->as, SND_CANCEL);                                     /* SHOP: servers are gone */
-    u->menu_flash = 20;
-    u->menu_focus = i;
+    play_sound(u->as, SE_BUTTON);
+    if (i == 0) return SCENE_SELECT;   /* RHYTHM GAME */
+    if (i == 1) return SCENE_PV;       /* PV */
+    if (i == 2) return SCENE_OPTION;   /* OPTIONS */
+    u->menu_focus = i;                 /* SHOP: the store is gone, so only the sound plays */
     return -1;
 }
 
@@ -612,14 +912,12 @@ static const char *k_kb_name[3] = {"keyboard_ori", "keyboard_fro", "keyboard_rah
 /* DISPLAY page: TouchPauseEnable s_Pos @0x13c668 / s_TexPos @0x13c688 (UI_tex_09), index 2*No + !selected */
 static const int k_pause_pos[4][2] = {{322, 696}, {336, 711}, {459, 696}, {473, 711}};
 static const int k_pause_tex[4][4] = {{125, 311, 135, 115}, {395, 386, 108, 93}, {260, 311, 135, 115}, {395, 293, 108, 93}};
-#define TIMING_X 400.5f   /* port-only INPUT TIMING: centre of the 439-wide inputbar drawn at x 181 */
-
-/* TouchSoundVolume Render @0x77020: lit cells = (int)(vol*15 + 1), none at 0 */
-/* volumes are stored in 1/15 steps; round so a value read back from the save (2 decimals in older
-   saves) still lights the same number of cells */
+/* TouchSoundVolume Render @0x77020: lit cells = (int)(vol*15 + 1), none at 0. The volume itself is
+   continuous (dragged, see option_event); the small bias keeps a 1/15 step read back from the save
+   (4 decimals, e.g. 0.1333) on the same cell count */
 static int vol_cells(float v) {
     if (v <= 0.0f) return 0;
-    int n = (int)lroundf(v * 15.0f) + 1;
+    int n = (int)(v * 15.0f + 1.0f + 1e-3f);
     return n > 16 ? 16 : n;
 }
 
@@ -628,6 +926,7 @@ static void opt_store(UiState *u) {
     u->save->has_opt = true;
     save_write(u->save);
     mixer_set_master(1.0f, u->opt->se_volume);
+    mixer_set_bgm(u->opt->bgm_volume);
 }
 
 static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
@@ -647,35 +946,77 @@ static void opt_adjust(UiState *u, int d) {
         else if (u->opt_row == 1) o->guide_panel = d < 0;
         else o->flower = d < 0;
         break;
-    case OPT_DISPLAY:
-        if (u->opt_row == 0) o->pause_button = d < 0;
-        else { o->input_timing += d; if (o->input_timing < -10) o->input_timing = -10; if (o->input_timing > 10) o->input_timing = 10; }
-        break;
-    case OPT_HELP: u->help_page = (u->help_page + d + 2) % 2; play_sound(u->as, SND_DECIDE); return;
+    case OPT_DISPLAY: o->pause_button = d < 0; break;
+    case OPT_HELP:   /* TouchButton HelpPage @0x45200: page +-1 clamped 0..9, setPage (the arrow at an end is hidden) */
+        if (u->help_page + d >= 0 && u->help_page + d < HELP_PAGES) {
+            u->help_page += d;
+            help_set_page(u->as->appdir, u->help_page);
+            play_sound(u->as, SE_BUTTON);   /* TouchHelpPage touchUp: SE 0x13 */
+        }
+        return;
     default: return;
     }
     opt_store(u);
-    play_sound(u->as, SND_DECIDE);
+    play_sound(u->as, SE_BUTTON);
 }
 
-static int opt_rows(int mode) { return mode == OPT_AUDIO || mode == OPT_KEYBOARD ? 3 : mode == OPT_DISPLAY ? 2 : 1; }
+static int opt_rows(int mode) { return mode == OPT_AUDIO || mode == OPT_KEYBOARD ? 3 : 1; }
+
+/* TouchSoundVolume touchDown/touchMoved/touchUp @0x77284/0x77364/0x772e8: a touch on a meter (box
+   440x84 px = ColSize (220,42) points @0x76f64) only records its x; each move then adds dx/440 to that
+   volume, dx in UIKit points (0x43dc0000 @0x774c4), i.e. scene px / 880 (clamped 0..1; the original
+   keeps SE in 0..0.75 and scales dx by 0.75, the same thing normalised) and moves the start point. A
+   full-width drag changes the volume by half. A tap without movement changes nothing. Release stores
+   the options. */
+static bool volume_drag_event(UiState *u, const SDL_Event *e) {
+    if (u->opt_mode != OPT_AUDIO) { u->vol_drag = -1; return false; }
+    if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT) {
+        float mx = (float)e->button.x, my = (float)e->button.y;
+        for (int r = 0; r < 2; r++)
+            if (my >= k_vol_y[r] - 10 && my < k_vol_y[r] + 74 && mx >= 113 && mx < 553) {
+                u->vol_drag = r;
+                u->vol_x = mx;
+                u->opt_row = r;
+                u->menu_kbd = false;
+                return true;
+            }
+        return false;
+    }
+    if (u->vol_drag < 0) return false;
+    if (e->type == SDL_MOUSEMOTION) {
+        float *v = u->vol_drag == 0 ? &u->opt->bgm_volume : &u->opt->se_volume;
+        *v = clamp01(*v + ((float)e->motion.x - u->vol_x) / 880.0f);
+        u->vol_x = (float)e->motion.x;
+        mixer_set_master(1.0f, u->opt->se_volume);
+        mixer_set_bgm(u->opt->bgm_volume);
+        return true;
+    }
+    if (e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT) {
+        u->vol_drag = -1;
+        opt_store(u);   /* TouchSoundVolume touchUp: no sound */
+        return true;
+    }
+    return false;
+}
 
 static void opt_open(UiState *u, int mode) {
     u->opt_mode = mode;
     u->opt_row = 0;
     u->help_page = 0;
     u->credits_t = 0;
+    if (mode == OPT_HELP) help_set_page(u->as->appdir, 0);   /* setMode HELP: m_HelpPage 0, setPage:0 */
 }
 
 static int option_event(UiState *u, const SDL_Event *e) {
+    if (volume_drag_event(u, e)) return -1;
     bool click = e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT;
     bool key = e->type == SDL_KEYDOWN && !e->key.repeat;
     SDL_Keycode k = key ? e->key.keysym.sym : 0;
     float mx = click ? (float)e->button.x : 0, my = click ? (float)e->button.y : 0;
     bool ok = key && (k == SDLK_RETURN || k == SDLK_SPACE || k == SDLK_KP_ENTER);
-    bool back = (key && (k == SDLK_ESCAPE || k == SDLK_BACKSPACE)) || (click && hit_back(mx, my));
+    bool back = back_event(u, e);   /* plays SE 8 itself */
+    if (key && (k == SDLK_ESCAPE || k == SDLK_BACKSPACE)) { back = true; play_sound(u->as, SE_BACK); }
     if (back) {
-        play_sound(u->as, SND_CANCEL);
         if (u->opt_mode == OPT_MAIN) return SCENE_TITLE;
         int from = u->opt_mode;
         opt_open(u, OPT_MAIN);
@@ -683,16 +1024,24 @@ static int option_event(UiState *u, const SDL_Event *e) {
         return -1;
     }
     if (u->opt_mode == OPT_MAIN) {
+        /* TouchCommonButton: held (m_TouchDownIdx >= 0) from the press on the button until the release */
+        if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT) {
+            u->opt_press = -1;
+            for (int i = 0; i < 6; i++)
+                if (in_rect((float)e->button.x, (float)e->button.y, 129, k_opt_list_y[i], 394, 82)) u->opt_press = i;
+        }
+        if (click) u->opt_press = -1;
         if (key && k == SDLK_UP) { u->opt_row = (u->opt_row + 5) % 6; u->menu_kbd = true; }
         if (key && k == SDLK_DOWN) { u->opt_row = (u->opt_row + 1) % 6; u->menu_kbd = true; }
         if (click) {
             u->menu_kbd = false;
             for (int i = 0; i < 6; i++)
-                if (mx >= 129 && mx < 523 && my >= k_opt_list_y[i] && my < k_opt_list_y[i] + 82) { u->opt_row = i; ok = true; }
+                if (tapped(u, 129, k_opt_list_y[i], 394, 82, mx, my)) { u->opt_row = i; ok = true; }
         }
-        if (ok) { play_sound(u->as, SND_HIT); opt_open(u, k_opt_list[u->opt_row]); }
+        if (ok) { play_sound(u->as, SE_BUTTON); opt_open(u, k_opt_list[u->opt_row]); }   /* TouchCommonButton */
         return -1;
     }
+    if (u->opt_mode == OPT_HELP && help_event(e)) return -1;   /* WindowHelpText scroll (+ keys) */
     int rows = opt_rows(u->opt_mode);
     if (key && k == SDLK_UP) u->opt_row = (u->opt_row + rows - 1) % rows;
     if (key && k == SDLK_DOWN) u->opt_row = (u->opt_row + 1) % rows;
@@ -701,62 +1050,69 @@ static int option_event(UiState *u, const SDL_Event *e) {
     if (key && k == SDLK_LEFT) opt_adjust(u, -1);
     if (key && k == SDLK_RIGHT) opt_adjust(u, 1);
     if (ok && (u->opt_mode == OPT_AUDIO && u->opt_row == 2)) opt_adjust(u, 1);
+    /* CREDITS: TouchGotoEnding (type 0x26, ending 112x32 at (487,891)); WindowOption TouchButton @0x4536c:
+       (song 9 unlocked, always in the port) SE 0x13, NextScene 9. Port: Enter presses it too. */
+    if (u->opt_mode == OPT_CREDITS && u->gd->nending > 0 && (ok || (click && tapped(u, 487, 891, 112, 32, mx, my)))) {
+        play_sound(u->as, SE_BUTTON);
+        return SCENE_ENDING;
+    }
     if (click) {
         switch (u->opt_mode) {
-        case OPT_AUDIO:
-            for (int r = 0; r < 2; r++)
-                if (my >= k_vol_y[r] - 10 && my < k_vol_y[r] + 44 && mx >= 113 && mx < 553) {   /* meter cells (orig. box 440x84) */
-                    u->opt_row = r;
-                    int cell = (int)((mx - 113) / 26);                 /* cell i sets i/15: cell 0 mutes, cell i > 0 lights i+1 */
-                    float v = clamp01((float)(cell > 15 ? 15 : cell) / 15.0f);
-                    if (r == 0) u->opt->bgm_volume = v; else u->opt->se_volume = v;
-                    opt_store(u);
-                    play_sound(u->as, SND_DECIDE);
+        case OPT_AUDIO:   /* TouchFailSoundEnable ON (120,740) / OFF (320,740) */
+            for (int b = 0; b < 2; b++)
+                if (tapped(u, 120 + 200.0f * b, 730, 200, 70, mx, my)) {
+                    u->opt_row = 2;
+                    if (u->opt->fail_sound != (b == 0)) opt_adjust(u, 1);
+                    else play_sound(u->as, SE_BUTTON);   /* TouchFailSoundEnable touchUp sounds either way */
                 }
-            if (my >= 730 && my < 800 && mx >= 120 && mx < 520) {  /* TouchFailSoundEnable ON (120,740) / OFF (320,740) */
-                u->opt_row = 2;
-                bool on = mx < 320;
-                if (u->opt->fail_sound != on) opt_adjust(u, 1);
-            }
             break;
-        case OPT_HAND:
-            if (my > 320 && my < 720) { u->opt->left_hand = mx < 320; opt_store(u); play_sound(u->as, SND_DECIDE); }
+        case OPT_HAND:    /* TouchHandSide: left / right halves */
+            for (int b = 0; b < 2; b++)
+                if (tapped(u, 320.0f * b, 320, 320, 400, mx, my)) { u->opt->left_hand = b == 0; opt_store(u); play_sound(u->as, SE_BUTTON); }
             break;
-        case OPT_KEYBOARD:
+        case OPT_KEYBOARD: {
             /* KeyBoardSelect panels 196x255 at x 20/222/424, y 304; PanelSelect ON (322,601) / OFF (449,601)
                129x110; FlowerUse ON (300,722) / OFF (428,722) 170x145 */
-            if (my >= 290 && my < 580 && mx >= 14 && mx < 626) {
-                u->opt_row = 0;
-                u->opt->keyboard = k_kb_of_slot[mx < 219 ? 0 : mx < 421 ? 1 : 2];
-                opt_store(u);
-                play_sound(u->as, SND_DECIDE);
-            } else if (my >= 601 && my < 711 && mx >= 322 && mx < 578) {
-                u->opt_row = 1;
-                u->opt->guide_panel = mx < 449;
-                opt_store(u);
-                play_sound(u->as, SND_DECIDE);
-            } else if (my >= 722 && my < 867 && mx >= 300 && mx < 598) {
-                u->opt_row = 2;
-                u->opt->flower = mx < 472;
-                opt_store(u);
-                play_sound(u->as, SND_DECIDE);
+            static const float kb_x[4] = {14, 219, 421, 626};
+            for (int s = 0; s < 3; s++)
+                if (tapped(u, kb_x[s], 290, kb_x[s + 1] - kb_x[s], 290, mx, my)) {
+                    u->opt_row = 0;
+                    u->opt->keyboard = k_kb_of_slot[s];
+                    opt_store(u);
+                    play_sound(u->as, SE_BUTTON);
+                }
+            for (int b = 0; b < 2; b++)
+                if (tapped(u, b ? 449 : 322, 601, b ? 129 : 127, 110, mx, my)) {
+                    u->opt_row = 1;
+                    u->opt->guide_panel = b == 0;
+                    opt_store(u);
+                    play_sound(u->as, SE_BUTTON);
+                }
+            for (int b = 0; b < 2; b++)
+                if (tapped(u, b ? 472 : 300, 722, b ? 126 : 172, 145, mx, my)) {
+                    u->opt_row = 2;
+                    u->opt->flower = b == 0;
+                    opt_store(u);
+                    play_sound(u->as, SE_BUTTON);
+                }
+            break;
+        }
+        case OPT_DISPLAY: /* TouchPauseEnable VISIBLE / INVISIBLE */
+            for (int b = 0; b < 2; b++)
+                if (tapped(u, b ? 458 : 322, 690, 136, 160, mx, my)) {
+                    u->opt_row = 0;
+                    u->opt->pause_button = b == 0;
+                    opt_store(u);
+                    play_sound(u->as, SE_BUTTON);
+                }
+            break;
+        case OPT_HELP:    /* TouchHelpPage arrows; the one at an end is hidden and inert */
+            for (int b = 0; b < 2; b++) {
+                float ax, ay, aw, ah;
+                help_button_rect(b, &ax, &ay, &aw, &ah);
+                if (help_button_shown(u->help_page, b) && tapped(u, ax, ay, aw, ah, mx, my)) opt_adjust(u, b ? 1 : -1);
             }
             break;
-        case OPT_DISPLAY:
-            if (my >= 690 && my < 850 && mx >= 322 && mx < 594) {
-                u->opt_row = 0;
-                u->opt->pause_button = mx < 458;
-                opt_store(u);
-                play_sound(u->as, SND_DECIDE);
-            } else if (my >= 862 && mx >= 170) {
-                u->opt_row = 1;
-                int v = (int)roundf((mx - TIMING_X) / 20.0f);
-                u->opt->input_timing = v < -10 ? -10 : v > 10 ? 10 : v;
-                opt_store(u);
-                play_sound(u->as, SND_DECIDE);
-            }
-            break;
-        case OPT_HELP: opt_adjust(u, mx < 320 ? -1 : 1); break;
         default: break;
         }
     }
@@ -769,28 +1125,40 @@ static void render_option(UiState *u) {
     const Options *o = u->opt;
     const Atlas *u1 = &u->as->ui1, *u3 = &u->as->ui3, *u4 = &u->as->ui4;
     spr_tl(r, &u->as->bg_options, "bg_options", 0, 0, 255);
+    render_bgfx(u);   /* WindowOption has a WindowBGEffect child too */
     if (u->opt_mode != OPT_HELP && u->opt_mode != OPT_CREDITS) {
         /* WindowOption Render @0x445d2: m_TextTitle at y 182, m_TextDesc at y 234 (capitals from 192 / 239) */
-        font_draw(r, k_opt_title[u->opt_mode], 320, 189, 4.4f, WHITE, 0);
-        font_draw(r, k_opt_sub[u->opt_mode], 320, 235, 2.4f, WHITE, 0);
+        /* setMode @0x42cb4: description OPTION_TITLE_0N from the IPA (k_opt_sub when absent), AUDIO + _01_OPT */
+        static const char *desc_key[7] = {"OPTION_TITLE_00", "OPTION_TITLE_01", "OPTION_TITLE_02", "OPTION_TITLE_03",
+                                          NULL, NULL, "OPTION_TITLE_04"};
+        option_titles_render(r, u->as->appdir, k_opt_title[u->opt_mode], desc_key[u->opt_mode], k_opt_sub[u->opt_mode],
+                             u->opt_mode == OPT_AUDIO ? "OPTION_TITLE_01_OPT" : NULL);
     }
     switch (u->opt_mode) {
     case OPT_MAIN:
         for (int i = 0; i < 6; i++) {
             float x = 129, y = k_opt_list_y[i];
             /* TouchCommonButton Render @0x646d0: like the title menu - base at pos, additive pulsing face
-               at (pos.x, pos.y + 1), corner brackets at pos + (1,1) / (342,1) on every button; the port
-               marks the keyboard row with the "on" face */
-            Uint8 v = pulse_level(u->ticks);
-            spr_tl(r, u1, "menubutton_l_base", x, y, 255);
+               at (pos.x, pos.y + 1), corner brackets at pos + (1,1) / (342,1) on every button. While held
+               (m_TouchDownIdx @0x6470a) the face is the next frame, menubutton_l_on (0x35 + 1 @0x6472a), and
+               the button is scaled 1.05 (@0x64988); the scaled geometry follows TouchTitleMenus (render_title).
+               The port also marks the keyboard row with the "on" face. */
+            bool held = u->opt_press == i;
+            float s = held ? 1.05f : 1.0f;
+            float bx = x, by = y, bw = 394, bh = 82, fx = x, fy = y, fw = 380.2f, fh = 68, pw = 39, ph = 68, pdx = 0, pdy = 0;
+            scale_rect(s, &bx, &by, &bw, &bh);
+            scale_rect(s, &fx, &fy, &fw, &fh);
+            scale_rect(s, &pdx, &pdy, &pw, &ph);
+            Uint8 v = pulse_level(u->ticks / 2);
+            spr_tl_wh(r, u1, "menubutton_l_base", bx, by, bw, bh, 255);
             SDL_SetTextureBlendMode(u1->tex, SDL_BLENDMODE_ADD);
             SDL_SetTextureColorMod(u1->tex, v, v, v);
-            spr_tl_wh(r, u1, i == u->opt_row && u->menu_kbd ? "menubutton_l_on" : "menubutton_l_off", x, y + 1, 380.2f, 68, v);
+            spr_tl_wh(r, u1, held || (i == u->opt_row && u->menu_kbd) ? "menubutton_l_on" : "menubutton_l_off", fx, fy + 1, fw, fh, v);
             SDL_SetTextureColorMod(u1->tex, 255, 255, 255);
             SDL_SetTextureBlendMode(u1->tex, SDL_BLENDMODE_BLEND);
-            spr_tl(r, u1, "parenthesis_00", x + 1, y + 1, 255);
-            spr_tl(r, u1, "parenthesis_01", x + 342, y + 1, 255);
-            font_draw(r, k_opt_title[k_opt_list[i]], x + 191, y + 22, 3.2f, WHITE, 0);
+            spr_tl_wh(r, u1, "parenthesis_00", bx + 1, by + 1, pw, ph, 255);
+            spr_tl_wh(r, u1, "parenthesis_01", bx + (held ? 358.05f : 341.0f) + 1, by + 1, pw, ph, 255);
+            font_draw(r, k_opt_title[k_opt_list[i]], x + 191, y + 22, 3.2f * s, WHITE, 0);
         }
         break;
     case OPT_AUDIO: {
@@ -878,13 +1246,6 @@ static void render_option(UiState *u) {
             font_draw(r, plabel[no], p[0] + t[2] * 0.5f, (float)(t[3] + 711), selected ? 2.6f : 2.1f,
                       selected ? WHITE : (SDL_Color){204, 204, 204, 255}, 0);
         }
-        /* port-only INPUT TIMING (MusicData GetInputTiming): inputbar / inputcursor, -10..+10 steps */
-        char buf[48];
-        snprintf(buf, sizeof buf, "INPUT TIMING %+d", o->input_timing);
-        bool tfocus = u->menu_kbd && u->opt_row == 1;
-        font_draw(r, buf, TIMING_X, 864, 2.2f, tfocus ? (SDL_Color){255, 240, 120, 255} : WHITE, 0);
-        spr_tl(r, &u->as->game1, "inputbar", TIMING_X - 219.5f, 908, 255);
-        spr_tl(r, &u->as->game1, "inputcursor", TIMING_X + 20.0f * o->input_timing - 34.5f, 889, 255);
         if (u->menu_kbd && u->opt_row == 0) {
             SDL_SetRenderDrawColor(r, 255, 240, 120, 255);
             SDL_FRect fr = {318, 692, 280, 158};
@@ -892,21 +1253,9 @@ static void render_option(UiState *u) {
         }
         break;
     }
-    case OPT_HELP: {
-        /* help_01/02: the 3x2 annotated screenshot sheets shipped for the in-game help */
-        spr_tl(r, u3, "helpline", 0, 60, 255);   /* WindowOption Render HELP case @0x44bc6 */
-        const Atlas *h = &u->as->help[u->help_page];
-        if (h->tex) {
-            SDL_Rect src = {0, 0, h->w < 960 ? h->w : 960, h->h < 960 ? h->h : 960};
-            spr_tl_rect(r, h, &src, 0, 150, 640, 640, 255);
-        }
-        char buf[32];
-        snprintf(buf, sizeof buf, "HELP  %d / 2", u->help_page + 1);
-        font_draw(r, buf, 320, 92, 3.2f, WHITE, 0);
-        spr_tl(r, u3, "arrow_00", 20, 820, 255);
-        spr_tl(r, u3, "arrow_01", 552, 820, 255);
+    case OPT_HELP:   /* WindowOption Render HELP case @0x44bc6 + WindowHelpText + TouchHelpPage (help.c) */
+        help_render(r, u->as, u->help_page, u->ticks);
         break;
-    }
     case OPT_CREDITS: {
         /* WindowOption m_CreditTex: a 640x960 page in the top-left of a 1024^2 texture (credits_ja.plist) */
         const Atlas *c = &u->as->credits;
@@ -914,19 +1263,23 @@ static void render_option(UiState *u) {
             SDL_Rect src = {0, 0, LOGICAL_W, LOGICAL_H};
             spr_tl_rect(r, c, &src, 0, 0, LOGICAL_W, LOGICAL_H, 255);
         }
+        /* TouchGotoEnding Render @0x778e4: `ending` (TP 35) at m_Pos (487,891), z -9.2; no pressed look
+           (only state 3 hides it); hidden in the port when gamedata.txt has no credits */
+        if (u->gd->nending > 0) spr_tl(r, u1, "ending", 487, 891, 255);
         break;
     }
     }
     render_back_button(u);
 }
 
-int ui_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
+static int ui_event_inner(UiState *u, const SDL_Event *e, int *song, int *diff) {
     bool click = e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT;
     bool down = e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT;
     bool key = e->type == SDL_KEYDOWN && !e->key.repeat;
     SDL_Keycode k = key ? e->key.keysym.sym : 0;
     float mx = (click || down) ? (float)e->button.x : 0, my = (click || down) ? (float)e->button.y : 0;
     bool ok_key = key && (k == SDLK_RETURN || k == SDLK_SPACE || k == SDLK_KP_ENTER);
+    press_track(u, e);
     switch (u->scene) {
     case SCENE_TITLE:
         if (u->tstate <= 6) {                       /* logos: a tap skips to the title (orig.: only on CRI) */
@@ -935,11 +1288,11 @@ int ui_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
         }
         if (u->tstate == 9) {
             if (key && k == SDLK_ESCAPE) return SCENE_QUIT;
-            if (click || ok_key) title_start_menu(u);
+            if (click || ok_key) { play_sound(u->as, SE_BUTTON); title_start_menu(u); }   /* WindowTitle touchUp: SE 19 */
             break;
         }
         if (u->tstate == 10) {
-            if (key && (k == SDLK_ESCAPE || k == SDLK_BACKSPACE)) { u->tstate = 9; play_sound(u->as, SND_CANCEL); break; }
+            if (key && (k == SDLK_ESCAPE || k == SDLK_BACKSPACE)) { u->tstate = 9; play_sound(u->as, SE_BACK); break; }   /* port: keyboard only */
             if (key && (k == SDLK_UP || k == SDLK_DOWN)) u->menu_kbd = true;
             if (key && k == SDLK_UP) u->menu_focus = (u->menu_focus + 3) % 4;
             if (key && k == SDLK_DOWN) u->menu_focus = (u->menu_focus + 1) % 4;
@@ -948,7 +1301,7 @@ int ui_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
             if (click) {
                 int h = menu_hit(u, mx, my), p = u->menu_press;
                 u->menu_press = -1;
-                if (h >= 0 && h == p) return menu_activate(u, h);
+                if (h >= 0 && h == p && tapped(u, u->menu_x[h], 538.0f + 82.0f * h, 394, 82, mx, my)) return menu_activate(u, h);
             }
         }
         break;
@@ -957,8 +1310,10 @@ int ui_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
     case SCENE_PV:
         return pv_event(u, e, song, diff);
     case SCENE_SELECT:
+        scroll_touch(u, e);
+        if (back_event(u, e)) { stop_preview(u); return SCENE_TITLE; }
         if (key) {
-            if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) { stop_preview(u); play_sound(u->as, SND_CANCEL); return SCENE_TITLE; }
+            if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) { stop_preview(u); play_sound(u->as, SE_BACK); return SCENE_TITLE; }
             if (k == SDLK_LEFT) select_move(u, -1, 0);
             if (k == SDLK_RIGHT) select_move(u, 1, 0);
             if (k == SDLK_UP) select_move(u, 0, -1);
@@ -966,51 +1321,65 @@ int ui_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
             if (ok_key) return start_game(u, song, diff);
         }
         if (down) {
-            u->drag_x0 = mx;
-            u->dragging = my > 293 && my < 609;
             u->play_pressed = hit_play(mx, my);
+            u->mode_pressed = hit_mode(mx, my);
         }
         if (click) {
-            bool was_play = u->play_pressed;
-            u->play_pressed = false;
-            if (u->dragging && fabsf(mx - u->drag_x0) > 50) {          /* swipe the cover flow */
-                select_move(u, mx < u->drag_x0 ? 1 : -1, 0);
-                u->dragging = false;
-                break;
-            }
-            u->dragging = false;
-            if (my > 293 && my < 609 && mx < 160) select_move(u, -1, 0);
-            else if (my > 293 && my < 609 && mx > 480) select_move(u, 1, 0);
-            else if (my >= 698 && my < 768 && mx >= 118 && mx < 522) {     /* MODE CHANGE (404x70 at (118,698)): Break the Limit */
-                u->diff = u->diff == DIFF_BREAK ? 3 : DIFF_BREAK;
-                play_sound(u->as, SND_DECIDE);
-            } else if (my >= 776 && my < 848 && u->diff != DIFF_BREAK) {   /* difficulty row: labels at x 20 + 154d */
-                int d = (int)((mx - 13) / 154); if (d < 0) d = 0;
-                if (d > 3) d = 3;
-                if (d != u->diff) { u->diff = d; play_sound(u->as, SND_DECIDE); }
-            } else if (was_play && hit_play(mx, my)) return start_game(u, song, diff);
-            else if (hit_back(mx, my)) { stop_preview(u); play_sound(u->as, SND_CANCEL); return SCENE_TITLE; }
+            /* the covers only scroll (WindowCover TouchButton:: is empty): no taps on them */
+            bool was_play = u->play_pressed, was_mode = u->mode_pressed;
+            u->play_pressed = u->mode_pressed = false;
+            if (was_mode && tapped(u, 118, 698, 404, 70, mx, my)) {           /* MODE CHANGE: Break the Limit */
+                set_difficulty(u, u->diff == DIFF_BREAK ? 3 : DIFF_BREAK);
+                play_sound(u->as, SE_BUTTON);
+            } else if (was_play && tapped(u, 164, 873, 324, 82, mx, my)) return start_game(u, song, diff);
+            else if (u->diff != DIFF_BREAK)                                 /* TouchDifficulty: labels at x 20 + 154d */
+                for (int d = 0; d < 4; d++)
+                    if (tapped(u, 13 + 154.0f * d, 776, 154, 72, mx, my)) {
+                        if (d != u->diff) set_difficulty(u, d);
+                        play_sound(u->as, SE_BUTTON);
+                    }
         }
         break;
     case SCENE_RESULT:
-        /* the original only reacts to its buttons: Back -> music select, PLAY AGAIN -> same song;
-           keyboard: Enter/Esc -> music select */
-        if (SDL_GetTicks() - u->enter_ms <= 500) break;
+        /* WindowResult: a touch or key while the counters run settles them; the buttons (Back -> music
+           select, PLAY AGAIN -> same song) exist only from state 6. Keyboard: Enter/Esc -> music select */
+        if (u->res_state < 6) {
+            if (down || key) result_skip(u);
+            break;
+        }
+        if (flickres_event(&u->fres, u->as, e)) break;   /* FLICK RESULT toggle + boards (Left/Right keys) */
+        if (back_event(u, e)) { stop_bgm(u); stop_roll(u); return SCENE_SELECT; }
         if (down) u->play_pressed = hit_play(mx, my);
-        if (ok_key || (key && (k == SDLK_ESCAPE || k == SDLK_BACKSPACE))) { stop_bgm(u); return SCENE_SELECT; }
+        if (ok_key || (key && (k == SDLK_ESCAPE || k == SDLK_BACKSPACE))) {
+            stop_bgm(u); stop_roll(u); play_sound(u->as, SE_BACK); return SCENE_SELECT;
+        }
         if (click) {
             bool was_play = u->play_pressed;
             u->play_pressed = false;
-            if (was_play && hit_play(mx, my)) {
+            if (was_play && tapped(u, 164, 873, 324, 82, mx, my)) {
                 u->song = u->res.song;
                 u->diff = u->res.diff;
                 return start_game(u, song, diff);
             }
-            if (hit_back(mx, my)) { stop_bgm(u); play_sound(u->as, SND_CANCEL); return SCENE_SELECT; }
         }
         break;
     }
     return -1;
+}
+
+/* Port aid for mouse clicks: on iOS a button shows its held look (_on face, 1.05x) for as long as the
+   finger is down; a mouse click (or a trackpad tap, whose press and release can arrive in the same
+   frame) is often over before a frame shows it. A release less than HOLD_MIN_MS after the press keeps
+   the held looks it ends until dn_ms + HOLD_MIN_MS (ui_render). The release itself is handled at once,
+   as before (the action fires, a scene change starts its fade). */
+int ui_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
+    if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT) u->lg_until = 0;
+    if (e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT && SDL_GetTicks() - u->dn_ms < HOLD_MIN_MS) {
+        u->lg_play = u->play_pressed; u->lg_back = u->back_pressed; u->lg_mode = u->mode_pressed;
+        u->lg_menu = u->menu_press; u->lg_opt = u->opt_press;
+        u->lg_until = u->dn_ms + HOLD_MIN_MS;
+    }
+    return ui_event_inner(u, e, song, diff);
 }
 
 int ui_update(UiState *u, int *song, int *diff) {
@@ -1024,14 +1393,11 @@ int ui_update(UiState *u, int *song, int *diff) {
         u->ticks++;
         if (u->scene == SCENE_TITLE) title_tick(u);
         else if (u->scene == SCENE_SELECT || u->scene == SCENE_PV) select_tick(u);
-        else if (u->scene == SCENE_OPTION) u->credits_t++;
-    }
-    if ((u->scene == SCENE_SELECT || u->scene == SCENE_PV) && u->preview_song != u->song && now - u->song_changed_ms > 350) {
-        stop_preview(u);
-        char path[1024];
-        snprintf(path, sizeof path, "%s/%s.adx", u->as->appdir, u->gd->songs[u->song].preview);
-        if (media_decode_audio(path, &u->preview, 1) >= 1) u->preview_voice = mixer_sfx_play(&u->preview, 0.9f, true);
-        u->preview_song = u->song;
+        else if (u->scene == SCENE_OPTION) {
+            u->credits_t++; bgfx_exec(u); bgfx_exec(u);
+            if (u->opt_mode == OPT_HELP) help_tick();   /* WindowHelpText exec */
+        }
+        else if (u->scene == SCENE_RESULT) result_tick(u);
     }
     return -1;
 }
@@ -1088,6 +1454,8 @@ static void render_title(UiState *u) {
            @0x6afcc) at pos + (1,1) and pos + (342,1), tracing the frame corners. While touched every
            rect is scaled 1.05x about its own centre, the face moves (+0.5,-1.5) and the right bracket
            sits 358.05 px from the left one. The port also shows keyboard focus with the "on" face. */
+        bool sliding = false;
+        for (int i = 0; i < 4; i++) if (u->menu_x[i] > 128.0f) sliding = true;
         for (int i = 0; i < 4; i++) {
             float x = u->menu_x[i], y = 538.0f + 82.0f * i;
             bool touched = u->menu_press == i;
@@ -1099,7 +1467,9 @@ static void render_title(UiState *u) {
             scale_rect(s, &pdx, &pdy, &pw, &ph);
             if (touched) { fx += 0.5f; fy -= 1.5f; }
             spr_tl_wh(r, u1, "menubutton_l_base", bx, by, bw, bh, 255);
-            Uint8 v = pulse_level(u->blink);   /* colour and alpha (v,v,v,v), additive: adds tex * v^2 */
+            /* colour and alpha (v,v,v,v), additive: adds tex * v^2; m_Counter is held at 11 while the
+               buttons slide in */
+            Uint8 v = pulse_level(sliding ? 11 : u->blink / 2);
             SDL_SetTextureBlendMode(u1->tex, SDL_BLENDMODE_ADD);
             SDL_SetTextureColorMod(u1->tex, v, v, v);
             spr_tl_wh(r, u1, lit ? "menubutton_l_on" : "menubutton_l_off", fx, fy + 1.8f, fw + 0.2f, fh + 0.2f, v);
@@ -1108,11 +1478,10 @@ static void render_title(UiState *u) {
             spr_tl_wh(r, u1, "parenthesis_00", bx + 1, by + 1, pw, ph, 255);
             spr_tl_wh(r, u1, "parenthesis_01", bx + (touched ? 358.05f : 341.0f) + 1, by + 1, pw, ph, 255);
             SDL_Color col = WHITE;   /* SHOP is white too on the device even though it is not ported */
-            if (u->menu_flash > 0 && i == u->menu_focus && i == 3) col = (SDL_Color){255, 150, 150, 255};
             /* label: 24-px capitals from y + 24, centred (device screenshot) */
             font_draw(r, k_menu_label[i], x + 193, y + 22, 3.25f * s, col, 0);
         }
-        spr_tl(r, u1, "crownicon_off", 14, 878, 255);
+        spr_tl(r, u1, "crownicon_off", 14, 893, 255);   /* TouchGotoScore initType @0x63440: m_Pos (14, 893) */
         spr_tl(r, u1, "infoicon_off", 559, 878, 255);
     }
     render_white_fade(u, u->fade);
@@ -1159,17 +1528,30 @@ static void render_cover(UiState *u, int i) {
    (music select, PV select, options, result): menubutton_s_base and the face both at pos (the face
    sprite is the size of the base's frame, the base adds the shadow; it pulses like the PLAY face),
    "back" at pos + (34,18),
-   corner brackets parenthesis_00/_01 at pos + (1,1) and pos + (77,1) */
+   corner brackets parenthesis_00/_01 at pos + (1,1) and pos + (77,1).
+   While pressed every rect is scaled 1.05x about its own centre, the face becomes menubutton_s_on and
+   the right bracket moves from pos.x + 76 to pos.x + 79.8 (the left bracket's (-2.5, +1.2) shift is
+   inferred from the same block). */
+static void spr_scaled(SDL_Renderer *r, const Atlas *a, const char *name, float x, float y, float s, Uint8 alpha) {
+    const Frame *f = atlas_find(a, name);
+    if (!f) return;
+    float w = (float)f->r.w, h = (float)f->r.h;
+    scale_rect(s, &x, &y, &w, &h);
+    spr_tl_wh(r, a, name, x, y, w, h, alpha);
+}
+
 static void render_back_button(UiState *u) {
     const Atlas *u1 = &u->as->ui1;
-    spr_tl(u->ren, u1, "menubutton_s_base", 17, 873, 255);
-    Uint8 v = pulse_level(u->ticks);   /* face colour = alpha = v (CoordinateColor, like the PLAY face) */
+    bool p = u->back_pressed;
+    float s = p ? 1.05f : 1.0f;
+    spr_scaled(u->ren, u1, "menubutton_s_base", 17, 873, s, 255);
+    Uint8 v = pulse_level(u->ticks / 2);   /* face colour = alpha = v (CoordinateColor, like the PLAY face) */
     SDL_SetTextureColorMod(u1->tex, v, v, v);
-    spr_tl(u->ren, u1, "menubutton_s_off", 17, 873, v);
+    spr_scaled(u->ren, u1, p ? "menubutton_s_on" : "menubutton_s_off", 17, 873, s, v);
     SDL_SetTextureColorMod(u1->tex, 255, 255, 255);
-    spr_tl(u->ren, u1, "back", 51, 891, 255);
-    spr_tl(u->ren, u1, "parenthesis_00", 18, 874, 255);
-    spr_tl(u->ren, u1, "parenthesis_01", 94, 874, 255);
+    spr_scaled(u->ren, u1, "back", 51, 891, s, 255);
+    spr_scaled(u->ren, u1, "parenthesis_00", p ? 18 - 2.5f : 18, p ? 874 + 1.2f : 874, s, 255);
+    spr_scaled(u->ren, u1, "parenthesis_01", p ? 17 + 79.8f + 1 : 94, 874, s, 255);
 }
 
 /* TouchMusicSelect initType:No:Pos: pos (164,873) / Render @0x6d510 (music select PLAY; the result
@@ -1190,7 +1572,7 @@ static void render_play_button(UiState *u, const char *label, bool pulse) {
     if (u->play_pressed) px -= 7;
     spr_tl_wh(r, u1, "menubutton_m_base", bx, by, bw, bh, 255);
     /* the face pulses (CoordinateColor on m_Counter, colour = alpha = v, blend 1); the label stays white */
-    Uint8 v = pulse_level(pulse ? u->pulse : 0);
+    Uint8 v = pulse_level(pulse ? u->pulse / 2 : 0);
     SDL_SetTextureColorMod(u1->tex, v, v, v);
     spr_tl_wh(r, u1, u->play_pressed ? "menubutton_m_on" : "menubutton_m_off", fx - 1, fy, fw + 2, fh, v);
     SDL_SetTextureColorMod(u1->tex, 255, 255, 255);
@@ -1200,10 +1582,12 @@ static void render_play_button(UiState *u, const char *label, bool pulse) {
 }
 
 /* rank mark of a cleared difficulty (WindowMusicSelect RenderRankMarkByRank:texIdx:posX:posY:
-   @0x4204c): rank 0 PERFECT star, 1 S, 2 A, 3 B, 4 C; 35x35, top-left */
-static void render_rank_mark(UiState *u, const Record *rec, float x, float y) {
+   @0x4204c): rank 0 PERFECT star, 1 S, 2 A, 3 B, 4 C; 35x35, top-left. Full size on the selected
+   difficulty (texIdx 0xe), 0.9 (0x3f666666) otherwise, scaled about the centre of the 35x35 rect. */
+static void render_rank_mark(UiState *u, const Record *rec, float x, float y, bool selected) {
     static const char *k_mark[5] = {"clearrank_star", "clearrank_s", "clearrank_a", "clearrank_b", "clearrank_c"};
-    if (rec->cleared && rec->rank >= 0 && rec->rank <= 4) spr_tl(u->ren, &u->as->ui1, k_mark[rec->rank], x, y, 255);
+    if (rec->cleared && rec->rank >= 0 && rec->rank <= 4)
+        spr_scaled(u->ren, &u->as->ui1, k_mark[rec->rank], x, y, selected ? 1.0f : 0.9f, 255);
 }
 
 /*
@@ -1220,17 +1604,7 @@ static void render_select(UiState *u) {
     const Atlas *u1 = &u->as->ui1;
     const SongInfo *si = &u->gd->songs[u->song];
     spr_tl(r, &u->as->bg_select, "bg_misicselect", 0, 0, 255);
-
-    /* EffectBGEffect render: RenderTexRot, additive */
-    SDL_SetTextureBlendMode(u1->tex, SDL_BLENDMODE_ADD);
-    for (int i = 0; i < MAX_BGFX; i++) {
-        BgFx *b = &u->bg[i];
-        if (!b->on) continue;
-        char name[32];
-        snprintf(name, sizeof name, "bgeffect_%02d", b->frame);
-        spr_rot(r, u1, name, b->x, b->y, b->ang * 57.29578f, 1.0f, 160);
-    }
-    SDL_SetTextureBlendMode(u1->tex, SDL_BLENDMODE_BLEND);
+    render_bgfx(u);
 
     /* cover flow, far covers first */
     int n = u->gd->nsongs;
@@ -1274,12 +1648,13 @@ static void render_select(UiState *u) {
     snprintf(buf, sizeof buf, "HIGH SCORE:%d  BPM:%d", rec->score, si->bpm);
     font_draw(r, buf, 320, 660, 2.6f, WHITE, 0);
 
-    spr_tl(r, u1, "modechange_off", 118, 698, 255);   /* TouchModeChange m_Pos (118,678) + 20 */
+    /* TouchModeChange m_Pos (118,678) + 20; the _on face while held */
+    spr_tl(r, u1, u->mode_pressed ? "modechange_on" : "modechange_off", 118, 698, 255);
 
     if (u->diff == DIFF_BREAK) {
         spr_tl_wh(r, u1, "difficultycursor", 155, 777, 328, 66, 255);
         spr_tl(r, u1, "difficulty_on_04", 208, 799, 255);
-        render_rank_mark(u, &u->save->rec[u->song][DIFF_BREAK], 430, 783);
+        render_rank_mark(u, &u->save->rec[u->song][DIFF_BREAK], 430, 783, true);
     } else {
         static const float k_label_x[4] = {20, 174, 328, 482}, k_mark_x[4] = {116, 300, 430, 602};
         spr_tl(r, u1, "difficultycursor", u->csr_x, 777, 255);
@@ -1288,7 +1663,7 @@ static void render_select(UiState *u) {
             snprintf(name, sizeof name, "difficulty_%s_%02d", d == u->diff ? "on" : "off", d);
             spr_tl(r, u1, name, k_label_x[d], 799, 255);
         }
-        for (int d = 0; d < 4; d++) render_rank_mark(u, &u->save->rec[u->song][d], k_mark_x[d], 783);
+        for (int d = 0; d < 4; d++) render_rank_mark(u, &u->save->rec[u->song][d], k_mark_x[d], 783, d == u->diff);
     }
     spr_tl(r, u1, "baseline", 0, 824, 255);
     }
@@ -1354,11 +1729,14 @@ static void render_result(UiState *u) {
     const GameResult *res = &u->res;
     const Atlas *u2 = &u->as->ui2;
     spr_tl(r, &u->as->bg_result, "bg_result", 0, 0, 255);
+    render_bgfx(u);
     render_result_panel(r, u2);
 
-    /* rank stamp: shown once the counters have finished (m_NowCounterIndex >= 11); the port shows
-       the totals at once */
-    if (res->rank >= 0) {
+    /* rank stamp: lands with the rank SE once the counters are done (state 1 on) */
+    /* flick page (TouchButton 0x20): Render @0x4ec06 skips RenderScore and all after it */
+    bool score_page = !u->fres.page;
+    bool stamped = u->res_state >= 1 && score_page;
+    if (stamped && res->rank >= 0) {
         spr_tl(r, u2, "clearrankstamp", 349, 224, 255);
         if (res->rank == 0) spr_tl(r, u2, "perfect", 383, 291, 255);
     }
@@ -1378,10 +1756,10 @@ static void render_result(UiState *u) {
         {"textbar_01", 181, 517, 278}, {"textbar_01", 181, 555, 278}, {"textbar_01", 181, 606, 278},
         {"textbar_00", 114, 652, 412}, {"textbar_00", 114, 690, 412}, {"textbar_00", 114, 728, 412},
     };
-    for (size_t i = 0; i < sizeof bars / sizeof *bars; i++)
+    for (size_t i = 0; score_page && i < sizeof bars / sizeof *bars; i++)
         spr_tl_wh(r, u2, bars[i].bar, bars[i].x, bars[i].y, bars[i].w, 23, 255);
 
-    if (res->rank > 0) {
+    if (stamped && res->rank > 0) {
         char name[32];
         snprintf(name, sizeof name, "clearrank_%02d", res->rank - 1);   /* frame 110 + m_Rank */
         spr_tl(r, u2, name, 394, 298, 255);
@@ -1401,47 +1779,68 @@ static void render_result(UiState *u) {
 
     /* labels: RenderScore @0x4dbdc (x, y); values: WindowCounter right-top at e_ResultCounterPos
        (0x13c0c8) with y - 6 */
-    struct { const char *label; int value; float lx, ly, vx, vy; } rows[] = {
-        {"Total Notes", res->total_notes, 124, 308, 340, 308},
-        {"Combo", res->max_combo, 124, 346, 340, 346},
-        {"Cool", res->counts[5], 206, 394, 435, 394},
-        {"Fine", res->counts[4], 206, 432, 435, 432},
-        {"Safe", res->counts[3], 206, 470, 435, 470},
-        {"Sad", res->counts[2], 206, 508, 435, 508},
-        {"Worst", res->counts[1], 206, 547, 435, 547},
-        {"\xe2\x99\xaa", res->interlude_hits, 206, 597, 435, 597},   /* "♪" */
-        {"Stage Score", res->stage_score, 131, 644, 510, 644},
-        {"Combo Bonus", res->combo_score, 131, 682, 510, 682},
-        {"Total Score", res->stage_score + res->combo_score, 132, 720, 510, 720},
+    /* rows in CheckCounter order (values in u->res_val) */
+    static const struct { const char *label; float lx, ly, vx, vy; } rows[11] = {
+        {"Total Notes", 124, 308, 340, 308},
+        {"Combo", 124, 346, 340, 346},
+        {"Cool", 206, 394, 435, 394},
+        {"Fine", 206, 432, 435, 432},
+        {"Safe", 206, 470, 435, 470},
+        {"Sad", 206, 508, 435, 508},
+        {"Worst", 206, 547, 435, 547},
+        {"\xe2\x99\xaa", 206, 597, 435, 597},   /* "♪" */
+        {"Stage Score", 131, 644, 510, 644},
+        {"Combo Bonus", 131, 682, 510, 682},
+        {"Total Score", 132, 720, 510, 720},
     };
-    char buf[32];
-    for (size_t i = 0; i < sizeof rows / sizeof *rows; i++) {
+    for (int i = 0; score_page && i < 11; i++) {
         /* the "♪" glyph sits 4 px further right in the original; the bitmap fallback font has no ♪,
            so draw the quaver sprite then */
         if (i == 7 && !text_has_glyph(0x266A)) spr_tl(r, &u->as->game1, "quaver_00", rows[i].lx - 6, rows[i].ly - 26, 255);
         else font_draw(r, rows[i].label, rows[i].lx + (i == 7 ? 4 : 0), rows[i].ly + 6, 2.6f, WHITE, -1);
-        /* counters group thousands with a comma ("18,572") */
-        int v = rows[i].value < 0 ? 0 : rows[i].value;
-        if (v >= 1000000) snprintf(buf, sizeof buf, "%d,%03d,%03d", v / 1000000, v / 1000 % 1000, v % 1000);
-        else if (v >= 1000) snprintf(buf, sizeof buf, "%d,%03d", v / 1000, v % 1000);
-        else snprintf(buf, sizeof buf, "%d", v);
+        if (i > u->res_idx) continue;   /* WindowCounter not activated yet */
+        /* WindowCounter: while counter i rolls, digit k (k = 1 the units) shows (ticks % 10) until
+           12k ticks have passed; then the real digit. Thousands are grouped with a comma ("18,572"). */
+        char d[16], buf[32];
+        snprintf(d, sizeof d, "%d", u->res_val[i] < 0 ? 0 : u->res_val[i]);
+        int len = (int)strlen(d), t = u->res_ctr[i];
+        if (i == u->res_idx)
+            for (int k = 1; k <= len; k++) if (t < 12 * k) d[len - k] = (char)('0' + t % 10);
+        int o = 0;
+        for (int j = 0; j < len; j++) {
+            if (j > 0 && (len - j) % 3 == 0) buf[o++] = ',';
+            buf[o++] = d[j];
+        }
+        buf[o] = 0;
         font_draw(r, buf, rows[i].vx, rows[i].vy + 6, 2.6f, WHITE, 1);
     }
 
     /* bottom buttons (device screenshot): TouchBack at (17,873) and PLAY AGAIN on the music select
-       PLAY button. REPLAY, the flick-result board and Twitter are not ported. */
-    render_back_button(u);
-    render_play_button(u, "PLAY AGAIN", false);
+       PLAY button, created in state 5 -> 6 with the FLICK RESULT toggle. REPLAY and Twitter are not ported. */
+    flickres_render(r, u->as, u->gd, u->opt, res, &u->fres);   /* boards (flick page only) */
+    if (u->res_state >= 6) {
+        render_back_button(u);
+        render_play_button(u, "PLAY AGAIN", false);
+        flickres_render_button(r, u->as, &u->fres);   /* TouchResultChange (530,784), z -9.5 */
+    }
 
-    /* WindowResult exec @0x4d6ac: state 1 starts 46 ticks in; FAILED (m_ContentOpen == 0, i.e. rank
-       D or E, never on Break the Limit) grows by 0.2/tick there. NEW RECORD grows the same way in
-       state 4, ~66 ticks later. Both scale about the centre of their full-size rect. */
-    float t = (float)u->ticks;
-    if (res->rank >= 5 && res->diff != DIFF_BREAK) spr_pop(r, u2, "failed", 359, 319, fminf(1.0f, fmaxf(0.0f, (t - 46) * 0.2f)));
-    if (u->new_record) spr_pop(r, u2, "newrecord", 461, 328, fminf(1.0f, fmaxf(0.0f, (t - 114) * 0.2f)));
+    /* WindowResult exec @0x4d6ac: FAILED (m_ContentOpen == 0, i.e. rank D or E, never on Break the
+       Limit) grows by 0.2/tick in state 1, NEW RECORD the same way in state 4. Both scale about the
+       centre of their full-size rect. */
+    if (score_page && res->rank >= 5 && res->diff != DIFF_BREAK) spr_pop(r, u2, "failed", 359, 319, u->res_fail_rate);
+    if (score_page && u->new_record) spr_pop(r, u2, "newrecord", 461, 328, u->res_rec_rate);
 }
 
 void ui_render(UiState *u) {
+    /* a quick click's held looks (ui_event) stay up to HOLD_MIN_MS after the press */
+    bool lg = u->lg_until && (Sint32)(u->lg_until - SDL_GetTicks()) > 0;
+    bool s_play = u->play_pressed, s_back = u->back_pressed, s_mode = u->mode_pressed;
+    int s_menu = u->menu_press, s_opt = u->opt_press;
+    if (lg) {
+        u->play_pressed |= u->lg_play; u->back_pressed |= u->lg_back; u->mode_pressed |= u->lg_mode;
+        if (u->menu_press < 0) u->menu_press = u->lg_menu;
+        if (u->opt_press < 0) u->opt_press = u->lg_opt;
+    }
     SDL_SetRenderDrawColor(u->ren, 0, 0, 0, 255);
     SDL_RenderClear(u->ren);
     switch (u->scene) {
@@ -1450,5 +1849,9 @@ void ui_render(UiState *u) {
     case SCENE_OPTION: render_option(u); break;
     case SCENE_RESULT: render_result(u); break;
     default: break;
+    }
+    if (lg) {
+        u->play_pressed = s_play; u->back_pressed = s_back; u->mode_pressed = s_mode;
+        u->menu_press = s_menu; u->opt_press = s_opt;
     }
 }

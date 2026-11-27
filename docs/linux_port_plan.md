@@ -12,7 +12,8 @@ This is a clean-room **reimplementation** of the game logic in portable C, drive
 | CRI Mana (`criManaPlayer_*`) | USM video + 2 ADX tracks + cue points | **Own USM chunk reader** (`port/src/usm.c`) for cue points and the @SFV/@SFA stream payloads, **own ADX decoder** and **pl_mpeg** (vendored, MIT) for the MPEG-1 video (`port/src/media.c`). Until the Android port this used FFmpeg |
 | CRI Atom / AudioToolbox / OpenAL / AVFoundation | SFX + BGM (`.caf` IMA4), preview loops (`.adx`) | own ADX and Apple IMA4 decoders to S16 PCM at load, mixed by an **SDL2 audio callback** (own mixer) |
 | Foundation `NSUserDefaults` / `NSKeyedArchiver` (`MikuFlick2.dat`) | save data | plain text save file in `$XDG_DATA_HOME/mikuflick-port/save.txt` (or `--data DIR`) |
-| GameKit, StoreKit, Twitter, Accounts, AdSupport, NoahSDK, Reachability, MessageUI | leaderboards, IAP DLC, tweeting, ads | **dropped**. The DLC servers are gone, and the bundled 11 songs are the playable set |
+| GameKit, StoreKit, Twitter, Accounts, AdSupport, NoahSDK, Reachability, MessageUI | leaderboards, IAP DLC, tweeting, ads | **dropped**. The DLC servers are gone, and the bundled 11 songs are the playable set. The RESULTS screen's LEADERBOARD / ACHIEVEMENTS buttons show a port note instead |
+| `NSLocale preferredLanguages` (`IsJapanese()`) | ja/en help and option text | `SDL_GetPreferredLocales()`; `MIKUFLICK_LANG=ja\|en` overrides it |
 | `NSString` cue parsing, `NSArray` note lists | gameplay containers | C arrays |
 
 ## 2. Asset pipeline (user-supplied)
@@ -24,16 +25,18 @@ make -C port setup IPA="/path/com.sega.MikuFlick02-....ipa"
 ```
 At runtime the port reads `.usm`, `.adx`, `.caf`, `.png` and atlas `.plist` **directly from the extracted .app directory** (`--app DIR`, default `extracted/ipa/Payload/MikuFlick2.app`). Nothing is converted or duplicated.
 
-In-app alternative (Android, or `mikuflick --import-ipa FILE --import-to DIR`): `src/ipa.c` reads the IPA zip directly (own central-directory reader and inflater with CRC-32 checks), runs the same table export on the binary in memory, and extracts only the top-level `.png .plist .usm .adx .caf` files of the app. On the user's IPA it produces 175 files byte-identical to `unzip`'s and the same `gamedata.txt`, in about 7 s on a desktop.
+In-app alternative (Android, or `mikuflick --import-ipa FILE --import-to DIR`): `src/ipa.c` reads the IPA zip directly (own central-directory reader and inflater with CRC-32 checks), runs the same table export on the binary in memory, and extracts only the top-level `.png .plist .usm .adx .caf` files of the app plus `en.lproj/Localizable.strings` and `ja.lproj/Localizable.strings` (help text and option subtitles, read at runtime by `help.c`). On the user's IPA it produces 175 files byte-identical to `unzip`'s and the same `gamedata.txt`, in about 7 s on a desktop.
 
 `mfextract` (whose logic now lives in `port/src/mfx.c`, shared with the importer) exports, by known VM address in the v1.1.5 binary (it checks the UUID `96B378F9-…` and refuses any other build):
-`_sTblDefaultMusicPackData` (song list), `e_FlickBoardTypeTbl` / `ResultTbl` / `SubTypeTbl` (kana→key/dir), `e_CharPictTbl` (kana→glyph tile), `e_FlickBoardPictTbl` (key tiles and positions), `s_tblNoteNormal_Front/Back`, `s_tblAddScore`, `s_tblTensionGauge`, `s_tblDifficultEndTimeOfs`, `_s_szSoundFile` / `_s_bSoundLoop`.
+`_sTblDefaultMusicPackData` (song list), `e_FlickBoardTypeTbl` / `ResultTbl` / `SubTypeTbl` (kana→key/dir), `e_CharPictTbl` (kana→glyph tile), `e_FlickBoardPictTbl` (key tiles and positions), `s_tblNoteNormal_Front/Back`, `s_tblAddScore`, `s_tblTensionGauge`, `s_tblDifficultEndTimeOfs`, `_s_szSoundFile` / `_s_bSoundLoop`, and (optional) `s_tbl_Ending` (the 76-line credits roll, `ending` lines).
+
+The `ending` lines are optional: they are written only when all 76 rows decode, and a `gamedata.txt` without them still loads, with the OPTIONS → CREDITS → ENDING button hidden and a log line asking to rerun setup. **Existing installs must rerun `make -C port setup` (or re-import the IPA) once** to get them; a re-import also adds the two `Localizable.strings` files, without which the help pages show only their images and the option subtitles fall back to built-in English labels (`make setup` already extracts the whole app, strings included).
 
 ## 3. Module layout (`port/`)
 
 | File | Responsibility |
 |---|---|
-| `src/main.c` | args, SDL init, main loop, scene switching (ids follow `SceneManager`: 1 Title, 2 Game, 3 MusicSelect, 8 Result) |
+| `src/main.c` | args, SDL init, main loop, scene switching with the original's sine fade and loading screen (ids follow `SceneManager`: 1 Title, 2 Game, 3 MusicSelect, 4 PV view, 5 RESULTS, 6 Options, 7 PV select, 8 Result, 9 Ending, 10 Records, 14 Ending movie) |
 | `src/gamedata.c` | parse `gamedata.txt` |
 | `src/bplist.c` | bplist00 reader (atlases) |
 | `src/atlas.c` | PNG textures (SDL_image) + atlas frame lookup + sprite drawing |
@@ -43,8 +46,14 @@ In-app alternative (Android, or `mikuflick --import-ipa FILE --import-to DIR`): 
 | `src/media.c` | own ADX + IMA4 decoders: whole-file audio decode to S16 stereo 44.1 kHz (per stream), streaming MPEG-1 video (pl_mpeg, `src/pl_mpeg_impl.c`) |
 | `src/mixer.c` | SDL audio callback: music (vocal + backing with separate gains), SFX voices, audio clock |
 | `src/game.c` | **exact port** of `NoteManager` / `NoteNormal` / `NoteInterlude` / cue handlers / judgement / scoring / tension gauge, plus gameplay rendering |
-| `src/ui.c` | title, music select, result screens, bitmap font |
-| `src/save.c` | high scores / clear flags / unlocks |
+| `src/ui.c` | title, music select, PV select, result and options screens, bitmap font |
+| `src/pvview.c` | PV playback overlay (`WindowPVView`): swipes, arrows, pause menu, lyrics, in-place reloads |
+| `src/flickresult.c` | FLICK RESULT page of the result screen (per-key boards), shared with RECORDS |
+| `src/help.c` | `Localizable.strings` lookup, OPTIONS → HELP pages (`WindowHelpText`) and localized option titles |
+| `src/ending.c` | credits roll (`WindowEnding`) and the ending movie (`ScenePreEnding`) |
+| `src/records.c` | title crown → RESULTS (`WindowScore`) → RECORDS (`WindowRecord`), extended record save lines |
+| `src/text.c` | SDL_ttf text drawing (M+ font) with the bitmap-font fallback |
+| `src/save.c` | high scores / clear flags, options, per-song input timing |
 | `src/view.c` | 640×960 render target shown centred and scaled to fit; bars of non-2:3 screens filled with a blurred backdrop (video in game); window/touch → 640×960 mapping |
 
 ## 4. Timing and sync (from RE §5.1–5.2)
@@ -62,17 +71,34 @@ In-app alternative (Android, or `mikuflick --import-ipa FILE --import-to DIR`): 
 | — | keyboard: keys `7 8 9 / 4 5 6 / 1 2 3 / 0` on the numpad, or `Q W E / A S D / Z X C / Space`, act as the あかさ/たなは/まやら/わ keys. Holding an **arrow key** at release flicks in that direction, and no arrow means a tap |
 | interlude panel | any key/click on the board area |
 | pause button | `Esc` / `P` |
+| pause menu INPUT TIMING (drag 10 points per step) | drag the bar (20 px per step), or `Left`/`Right` while paused |
+| PV view swipe (> 160 points) | horizontal mouse/touch drag of more than 320 px, or `Left`/`Right` |
+| — (touch only) | keyboard equivalents on every menu screen (see `port/README.md`) |
+
+Touches in the original are UIKit points (320×480); the port converts its 640×960 logical coordinates (× 0.5) wherever the original compares distances or areas in points (re_notes §5.7).
 
 ## 6. Deliberate deviations
 
-* No network features (shop, Twitter, Game Center, ads, info feed) and no in-app purchases.
-* Replay recording, the collection and PV playlist editing are not ported. The options screen stores its settings in the save file; command-line flags (`--offset`, `--volume`, `--se-volume`, `--no-fail-sound`) override them for a session.
-* Menu screens are simplified re-layouts built from the original atlas sprites. They are not pixel copies of the iOS layouts, whose positions are scattered across hundreds of `Window*` methods.
+* No network features (shop, Twitter, Game Center, ads, info feed) and no in-app purchases. On the RESULTS screen (title crown), LEADERBOARD and ACHIEVEMENTS switch to the screen's dormant "no function" mode with port text ("Game Center is not available."); the original's Japanese message is game text and is not copied.
+* Replay recording (REPLAY on the result screen), Twitter, the collection, the PV playlist editor, the help tutorial-movie button and the help scroll handle are not ported. The options screen stores its settings in the save file; command-line flags (`--offset`, `--volume`, `--se-volume`, `--no-fail-sound`) override them for a session (`--offset` is then not saved).
+* **Everything is unlocked** from the start. So the ENDING button on OPTIONS → CREDITS is always shown, while the original's first-clear trigger (all of songs 0–8 cleared on Normal while song 9 is locked → credits → ending movie → 初音ミクの激唱 Extreme) can never fire; the movie tail is implemented and reachable with `--start-scene ending|movie`. The credits roll and movie can't be skipped, as in the original.
+* **INPUT TIMING** is in the pause menu, per song, −10…+10, as in the original (an earlier port version had one global value on the DISPLAY page; old saves are migrated to every song). `Left`/`Right` while paused also step it.
+* **Fonts.** All text uses the bundled M+ 1p Bold instead of the iOS system font (Hiragino/Helvetica, regular weight in some places), condensed to 0.93 for Latin text; help and licence lines are condensed to fit 512 px rather than reflowed.
+* **Help language** follows the system locale like the original (first preferred language "ja" → Japanese, else English); `MIKUFLICK_LANG=ja|en` overrides it. The rest of the port's own UI text stays English, so a Japanese system shows Japanese help and subtitles next to English menus.
+* **SHUFFLE** (PV select): the original reads it only in PLAYLIST mode. Without the playlist editor the port keeps it available: at the end of a PV it picks a random song (`rand() % nsongs`, may repeat) and takes priority over LOOP. Swipes stay sequential.
+* **PV view keys:** `Esc` / Android Back pause the PV (RESUME / RETRY / MUSIC SELECT) instead of quitting to PV select; `Left`/`Right` stand for swipes.
+* **Quick clicks:** a mouse click or trackpad tap can press and release within one frame, so flick keys, the pause button and menu buttons keep their pressed look for at least 100 ms after the press. Judgement timing is unaffected.
+* **macOS trackpad fingers** (`SDL_TOUCH_DEVICE_INDIRECT_RELATIVE`) report pad positions, not screen positions; they are ignored (the mouse events still work), so they no longer press phantom keys.
+* **Scene fades:** menus keep ticking during a fade-in (the original freezes them); setup is synchronous behind a full-alpha loading frame.
+* **Pause button cut-off:** the original refuses the pause once the movie's last frame is reached; the port refuses it in the last 2 s.
+* **RECORDS:** lists every song in music-select order with all 5 difficulties; the touch slop before arrows hide is 4 px; the background cubes are not drawn; stars are skipped on a Break the Limit page (the original tests the difficulty last played).
+* Keyboard equivalents exist for every touch gesture (see `port/README.md`); the original is touch only.
 * Lyric-line telops (op 3) are only shown in PV mode in the original, so the core game does not need a text font.
+* Menu layouts and timings are taken from the binary (re_notes §6); the remaining visual differences are listed in re_notes §6.9.
 
 ## 7. Status and verification (milestone 3)
 
-Implemented in `port/`: boot logos, title, music select (art, logo, stars, preview loop), the full rhythm game (video, both audio tracks, cue-driven notes, judgement, scoring, combo, climax bonus, interludes, tension gauge with vocal fade, game over, pause), result screen with rank, and save file.
+Implemented in `port/`: boot logos, title, music select (art, logo, stars, preview loop), the full rhythm game (video, both audio tracks, cue-driven notes, judgement, scoring, combo, climax bonus, interludes, tension gauge with vocal fade, game over, pause with INPUT TIMING), result screen with rank and the FLICK RESULT page, RESULTS / RECORDS, OPTIONS with the original HELP text and the ENDING credits roll and movie, the PV viewer with swipes and its pause menu, and save file.
 
 Headless checks (`SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy`, real-time audio clock):
 
@@ -86,10 +112,16 @@ Headless checks (`SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy`, real-time au
 | in-app importer (`--import-ipa`, same code as Android) | output identical to `unzip` + `mfextract` | 175 files byte-identical, same `gamedata.txt`, about 7 s; malformed/truncated IPAs refused with a message and no leftover data |
 | magnet Extreme `--autoplay` and `--autoplay-input` after replacing FFmpeg with own ADX/IMA4 decoders and pl_mpeg (2026-11-24) | unchanged | both 115,616 PERFECT, 172 COOL, 77/77. Frames 0 and 600 match FFmpeg at PSNR 45.7 / 42.9 dB |
 | Android debug APK on a real phone (A059P, arm64, Android 16), magnet Extreme `--autoplay` | same as Linux | 115,616 PERFECT, 172 COOL, 77/77; video correct; tap and Back key navigate the menus |
+| magnet Extreme `--autoplay` and `--autoplay-input` after each of the 2026-11-27 UI changes (PV view, FLICK RESULT, ending, records, flick board, HUD; desktop build, dummy SDL drivers) | unchanged | every run 115,616, stage 54,116, combo bonus 61,500, max combo 172, 172 COOL, 77/77 |
+| FLICK RESULT counters, magnet Extreme `--autoplay` | per-key totals sum to the 172 notes, all 100 % | 36+13+17+34+21+14+9+5+14+9 = 172, all boards green at 100 % |
+| RECORDS save: autoplay from an old-format save (`rec` + `timing` lines only) | new `recx` / `flk` lines written, old lines kept | `recx 6 3 172 54116 61500 77 1 …`, 10 `flk` lines summing to 172; `timing`, `opt` and other `rec` lines kept; an old-format save loads with the new fields 0 |
+| `mfextract` with the ending table | 76 `ending` lines, every other line unchanged | 76 lines; the rest identical to the previous `gamedata.txt`; with an old `gamedata.txt` the ENDING button is hidden and a log line asks to rerun setup |
+| OPTIONS → CREDITS → ENDING round trip, headless | roll ≈ 100.7 s, hold, BGM fade, back to CREDITS through the loading screen | ran end to end in one ~117 s run; `--start-scene movie` starts 激唱 Extreme ≈ 9.5 s in |
+| PV view, scripted mouse drags | tap does nothing, > 320 px drag changes PV, pause button, RESUME, RETRY fade-in, MUSIC SELECT | as expected (screenshots); a natural movie end with LOOP/SHUFFLE was not run headless (same code path as a swipe reload) |
 
-Caveat: if three instances share the CPU under the software renderer, frame times exceed the 33 ms tick and synthetic presses land late. The game samples input once per frame, as the original does (60 fps), so play quality depends on the frame rate. With a GPU renderer and vsync this is not an issue.
+Caveat: if three instances share the CPU under the software renderer, frame times exceed the 33 ms tick and synthetic presses land late. The game samples input once per frame (the original runs at 30 fps), so play quality depends on the frame rate. With a GPU renderer and vsync this is not an issue.
 
-Touch input was checked on a phone (Android build, §9): menus, the flick keys' touch areas and the Back button. Not yet measured: audio output latency on real devices (PipeWire/Pulse on Linux, OpenSL ES/AAudio on phones; it is compensated only by one SDL buffer, and the input-timing option / `--offset` is the calibration knob), and long play sessions.
+Touch input was checked on a phone (Android build, §9): menus, the flick keys' touch areas and the Back button. Not yet measured: audio output latency on real devices (PipeWire/Pulse on Linux, OpenSL ES/AAudio on phones; it is compensated only by one SDL buffer, and the pause menu's per-song INPUT TIMING / `--offset` is the calibration knob), and long play sessions. Not yet checked on a device: the new PV swipes, RECORDS swipe paging (the `--script` drag delivers down/move/up in one frame, so paging was tested with the arrows and keys), the quick-click pressed look of the pause menu, and the in-app import of the two `Localizable.strings` files on Android.
 
 ## 8. Build
 
@@ -99,6 +131,8 @@ make -C port            # builds port/mikuflick
 make -C port setup IPA=…  # one-time asset extraction + table export
 ./port/mikuflick [--app DIR] [--data DIR]
 ```
+
+Environment variables: `MIKUFLICK_AUDIO_BUFFER=N` (audio buffer in frames, a power of two from 256 to 8192; default 1024 on desktop, 512 on Android; use a larger value if desktop output crackles under load, the audio clock accounts for the granted size) and `MIKUFLICK_LANG=ja|en` (help/subtitle language).
 
 Without `unzip`, use the built-in importer instead of `setup`:
 ```

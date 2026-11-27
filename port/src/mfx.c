@@ -96,6 +96,34 @@ static int cfstring_x(Ctx *c, uint32_t vm, int nospace) {
     return 0;
 }
 
+/* s_tbl_Ending @0x1413b8: the WindowEnding credits roll, 76 rows of {CFString *text, s32 font size,
+   s32 gap in px to the next line} (WindowEnding init loop @0x38a56-0x38b36, Render @0x38e6c).
+   Optional: written only when every row decodes; without it the port hides the ENDING button.
+   Line: "ending <i> <size> <gap> <text>" (text to the end of the line, leading spaces kept). */
+#define A_ENDING 0x1413b8u
+#define N_ENDING 76
+static int cfstring_ok(const Ctx *c, uint32_t vm) {
+    if (vm < VM_BASE || vm - VM_BASE + 16 > c->len) return 0;
+    uint32_t w[4];
+    memcpy(w, c->buf + (vm - VM_BASE), 16);
+    uint32_t unit = w[1] == 0x7d0 ? 2 : w[1] == 0x7c8 ? 1 : 0;
+    return unit && w[3] > 0 && w[3] <= 512 && w[2] >= VM_BASE && w[2] - VM_BASE + (size_t)w[3] * unit <= c->len;
+}
+
+static void write_ending(Ctx *c) {
+    for (int i = 0; i < N_ENDING; i++) {
+        uint32_t row = A_ENDING + (uint32_t)i * 12;
+        int32_t size = s32(c, row + 4), gap = s32(c, row + 8);
+        if (!cfstring_ok(c, u32(c, row)) || size < 4 || size > 128 || gap < 0 || gap > 4000) return;
+    }
+    for (int i = 0; i < N_ENDING; i++) {
+        uint32_t row = A_ENDING + (uint32_t)i * 12;
+        fprintf(c->o, "ending %d %d %d ", i, s32(c, row + 4), s32(c, row + 8));
+        cfstring_x(c, u32(c, row), 0);
+        fputc('\n', c->o);
+    }
+}
+
 /* find the LC_UUID payload */
 static const uint8_t *find_uuid(const Ctx *c) {
     if (c->len < 28) return NULL;
@@ -177,6 +205,7 @@ int mfx_write_gamedata(const uint8_t *bin, size_t len, FILE *out, char *err, siz
         if (!cfstring_x(c, u32(c, A_SOUNDFILE + i * 4), 1)) die(c, "damaged game binary (sound name)");
         fprintf(o, " %d\n", u8(c, A_SOUNDLOOP + i) ? 1 : 0);
     }
+    write_ending(c);
     if (ferror(o)) die(c, "could not write gamedata.txt");
     return nsongs;
 }

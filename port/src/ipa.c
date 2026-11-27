@@ -457,6 +457,8 @@ static void remove_tree(const char *path) {
 }
 
 static bool wanted(const char *rest) {
+    /* the help text and option subtitles (help.c) */
+    if (!strcmp(rest, "en.lproj/Localizable.strings") || !strcmp(rest, "ja.lproj/Localizable.strings")) return true;
     if (!*rest || strchr(rest, '/') || strchr(rest, '\\') || rest[0] == '.') return false;   /* top level only */
     const char *dot = strrchr(rest, '.');
     if (!dot) return false;
@@ -617,6 +619,8 @@ bool ipa_import(int fd, const char *dir, IpaProgress cb, void *ud, char *err, si
         const Entry *e = &ents[i];
         if (strncmp(e->name, prefix, plen) || !wanted(e->name + plen)) continue;
         snprintf(path, sizeof path, "%s/%s", tmp, e->name + plen);
+        char *slash = strrchr(path, '/');   /* <lang>.lproj/ (the only wanted subfolders) */
+        if (slash > path + strlen(tmp)) { *slash = 0; mkdir(path, 0755); *slash = '/'; }
         j.f = fopen(path, "wb");
         if (!j.f) { seterr(err, errlen, "Cannot write %s (%s).", path, strerror(errno)); goto fail_tmp; }
         j.label = e->name + plen;

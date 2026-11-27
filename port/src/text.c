@@ -117,6 +117,16 @@ static Entry *lookup(SDL_Renderer *ren, const char *text, int px, SDL_Color c, b
     return victim;
 }
 
+/* Latin-only text for the condensing below; U+3000 (the ideographic space the English help lines
+   are indented with) does not count as non-Latin */
+static bool latin_text(const char *text) {
+    for (const unsigned char *c = (const unsigned char *)text; *c; c++) {
+        if (c[0] == 0xE3 && c[1] == 0x80 && c[2] == 0x80) { c += 2; continue; }
+        if (*c >= 0x80) return false;
+    }
+    return true;
+}
+
 /* size: legacy bitmap scale (7*scale px cap height); y is the top of the capitals; align -1/0/1 */
 void font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scale, SDL_Color col, int align) {
     if (!T.ok || !text[0]) { bitmap_font_draw(ren, text, x, y, scale, col, align); return; }
@@ -127,8 +137,7 @@ void font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scal
     /* the original's iOS UI font is narrower than M+ 1p Bold: measured against device screenshots
        (title menu, result labels) the same Latin strings come out 7-11% wider, so condense those to
        match. Japanese text (PV lyrics) was not measured and keeps the font's own proportions. */
-    bool latin = true;
-    for (const unsigned char *c = (const unsigned char *)text; *c; c++) if (*c >= 0x80) { latin = false; break; }
+    bool latin = latin_text(text);
     float w = (float)e->w * (latin ? 0.93f : 1.0f), h = (float)e->h;
     float dx = align < 0 ? x : align == 0 ? x - w / 2 : x - w;
     float dy = y - h * 0.2f;   /* TTF line box starts above the cap height */
@@ -138,6 +147,25 @@ void font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scal
         SDL_RenderCopyF(ren, sh->tex, NULL, &d2);
     }
     SDL_FRect d = {dx, dy, w, h};
+    SDL_SetTextureAlphaMod(e->tex, col.a);
+    SDL_RenderCopyF(ren, e->tex, NULL, &d);
+}
+
+/* font_draw without the drop shadow: a single TexTextManager Render (WindowEnding credits roll) */
+void font_draw_plain(SDL_Renderer *ren, const char *text, float x, float y, float scale, SDL_Color col, int align) {
+    font_draw_plain_fit(ren, text, x, y, scale, col, align, 0.0f);
+}
+
+/* font_draw_plain condensed horizontally (never wrapped) so it is at most max_w px wide (0 = no limit):
+   the original's help/licence lines fit their width with the narrower iOS font */
+void font_draw_plain_fit(SDL_Renderer *ren, const char *text, float x, float y, float scale, SDL_Color col, int align,
+                         float max_w) {
+    Entry *e = T.ok && text[0] ? lookup(ren, text, (int)(scale * 10.0f + 0.5f), col, false) : NULL;
+    if (!e) { bitmap_font_draw(ren, text, x, y, scale, col, align); return; }
+    bool latin = latin_text(text);   /* same Latin condensing as font_draw */
+    float w = (float)e->w * (latin ? 0.93f : 1.0f), h = (float)e->h;
+    if (max_w > 0.0f && w > max_w) w = max_w;
+    SDL_FRect d = {align < 0 ? x : align == 0 ? x - w / 2 : x - w, y - h * 0.2f, w, h};
     SDL_SetTextureAlphaMod(e->tex, col.a);
     SDL_RenderCopyF(ren, e->tex, NULL, &d);
 }
