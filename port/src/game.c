@@ -1096,12 +1096,21 @@ bool game_update(Game *g) {
  * See docs/re_notes.md §6.
  */
 
+/* note sheet: e_CharPictTbl tex 4/6 (+1 when enabled). SystemTexture LoadBoardTex also swaps the hiragana
+   sheets for their _fullroman / _romanhira versions with the KEYBOARD option (same tile layout); the
+   katakana sheets have no such versions */
+static const Atlas *kana_sheet(Game *g, int ch, bool playable) {
+    int kb = g->opt->keyboard, t = playable ? 1 : 0;
+    if (g->gd->kana[ch].tex >= 6) return &g->as->kana_tex[2 + t];
+    if (kb >= 1 && kb <= 2 && g->as->kana_kb[kb - 1][t].tex) return &g->as->kana_kb[kb - 1][t];
+    return &g->as->kana_tex[t];
+}
+
 /* note glyph: RenderTex2DClip(tex, pos.x-39, pos.y, 78x78) */
 static void draw_kana(Game *g, int ch, bool playable, float x, float y, Uint8 alpha) {
     const KanaInfo *k = &g->gd->kana[ch];
-    int sheet = (k->tex >= 6 ? 2 : 0) + (playable ? 1 : 0); /* e_CharPictTbl tex 4/6 (+1 when enabled) */
     SDL_Rect src = {k->x, k->y, 78, 78};
-    spr_tl_rect(g->ren, &g->as->kana_tex[sheet], &src, x, y, 78, 78, alpha);
+    spr_tl_rect(g->ren, kana_sheet(g, ch, playable), &src, x, y, 78, 78, alpha);
 }
 
 /* s_tblKeyGuideTexIdx @0x139460 (guidepanel_off) / _Next @0x139474 (guidepanel_on), indexed by flick
@@ -1415,7 +1424,7 @@ void game_render(Game *g) {
             /* NoteNormal render @0x2269e: a climax note at combo >= 100 is tinted with
                s_tblRainbow[(m_CrimaxCnt + 10) % 28] (m_CrimaxCnt counts ticks like m_Cnt) */
             const Uint8 *c = k_rainbow[((n->cnt + 10) % 28 + 28) % 28];
-            SDL_Texture *kt = g->as->kana_tex[(g->gd->kana[n->ch].tex >= 6 ? 2 : 0) + (n->playable ? 1 : 0)].tex;
+            SDL_Texture *kt = kana_sheet(g, n->ch, n->playable)->tex;
             if (kt) SDL_SetTextureColorMod(kt, c[0], c[1], c[2]);
             draw_kana(g, n->ch, n->playable, gx, NOTE_Y, a);
             if (kt) SDL_SetTextureColorMod(kt, 255, 255, 255);

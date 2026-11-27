@@ -25,6 +25,11 @@ bool assets_load(Assets *as, SDL_Renderer *ren, const GameData *gd, const char *
     ok &= must(atlas_load(&as->bg_result, ren, appdir, "bg_tex_03"), "bg_tex_03");
     static const char *kana[4] = {"mf_hiragana_blank", "mf_hiragana_telop", "mf_katakana_blank", "mf_katakana_telop"};
     for (int i = 0; i < 4; i++) ok &= must(atlas_load(&as->kana_tex[i], ren, appdir, kana[i]), kana[i]);
+    /* KEYBOARD variants of the hiragana notes (same tile layout; optional, the plain sheets are used without them) */
+    static const char *kana_kb[2][2] = {{"mf_hiragana_blank_fullroman", "mf_hiragana_telop_fullroman"},
+                                        {"mf_hiragana_blank_romanhira", "mf_hiragana_telop_romanhira"}};
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++) atlas_load(&as->kana_kb[i][j], ren, appdir, kana_kb[i][j]);
     static const char *logos[3] = {"logo_sega", "logo_crypton", "logo_cri"};
     for (int i = 0; i < 3; i++) atlas_load(&as->logos[i], ren, appdir, logos[i]); /* optional */
     atlas_load(&as->launch, ren, appdir, "LaunchImage@2x");
@@ -62,7 +67,8 @@ void assets_free(Assets *as) {
                     &as->bg_select, &as->bg_result, &as->kana_tex[0], &as->kana_tex[1], &as->kana_tex[2],
                     &as->kana_tex[3], &as->logos[0], &as->logos[1], &as->logos[2], &as->launch, &as->ui3,
                     &as->ui4, &as->bg_options, &as->help[0], &as->help[1], &as->credits, &as->game2_kb[0],
-                    &as->game2_kb[1], &as->saisei, &as->ui9, &as->loading};
+                    &as->game2_kb[1], &as->saisei, &as->ui9, &as->loading, &as->kana_kb[0][0], &as->kana_kb[0][1],
+                    &as->kana_kb[1][0], &as->kana_kb[1][1]};
     for (size_t i = 0; i < sizeof all / sizeof *all; i++) atlas_free(all[i]);
     for (int i = 0; i < NUM_SOUNDS; i++) pcm_free(&as->sounds[i]);
 }

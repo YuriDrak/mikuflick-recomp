@@ -181,6 +181,7 @@ typedef struct {
     Atlas game1, game2, effect1, ui1, ui2, ui3, ui4, ui5, bg_title, bg_select, bg_result, bg_options;
     Atlas game2_kb[2];      /* key faces for KEYBOARD option 1/2: game_tex_02_fullroman / _romanhira (frames of game_tex_02) */
     Atlas kana_tex[4];      /* mf_hiragana_blank, mf_hiragana_telop, mf_katakana_blank, mf_katakana_telop */
+    Atlas kana_kb[2][2];    /* hiragana {blank, telop} for KEYBOARD option 1/2: mf_hiragana_*_fullroman / _romanhira (katakana has none) */
     Atlas logos[3];         /* logo_sega, logo_crypton, logo_cri */
     Atlas help[2], credits; /* help_01/02, credits_en */
     Atlas saisei;           /* PV select: play mark on the jacket */

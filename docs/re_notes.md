@@ -235,7 +235,7 @@ IDs 0–14 = SE01–SE15, 15 MusicSelect, 16 J01_01, 17 SE01_01, 18 SE01_03, 19 
 `TouchSoundVolume` and `TouchInputTiming` play nothing, nor do the game-over path and the combo milestones. Music select and PV select stop the BGM and play the previews instead. The ported menus never use 1, 4 or 5 (an older port used them as "hit", "decide" and "cancel"). The original has one OpenAL source per sound, so playing a sound again restarts it instead of layering a copy (the port's mixer does the same). SE volume is kept in 0..0.75 (slider 1.0 = 0.75).
 
 ### 5.13 Glyphs (`e_CharPictTbl` @0x139fde, 6-byte rows `{u16 tex, x, y}`) [D]
-These are 78×78 tiles. tex 4 = `mf_hiragana_blank`, 6 = `mf_katakana_blank`. The note adds `+enabled`, so a playable note uses the `_telop` sheet (5/7) and a display-only note the `_blank` sheet. `evaluation_00..04` = Cool!!, Fine!, Safe, Sad, Worst (index = 5 − grade).
+These are 78×78 tiles. tex 4 = `mf_hiragana_blank`, 6 = `mf_katakana_blank`. The note adds `+enabled`, so a playable note uses the `_telop` sheet (5/7) and a display-only note the `_blank` sheet. With the KEYBOARD option, `SystemTexture LoadBoardTex` also swaps the two hiragana sheets for `mf_hiragana_{blank,telop}_fullroman` (FULL ROMAN) or `_romanhira` (ROMAN SUPPORT), same tile layout; the katakana sheets have no such versions. `evaluation_00..04` = Cool!!, Fine!, Safe, Sad, Worst (index = 5 − grade).
 
 ## 6. Rendering and screens (verified against the iOS screenshots in help_01.png / help_02.png)
 
