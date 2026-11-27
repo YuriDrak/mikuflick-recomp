@@ -538,6 +538,8 @@ static bool *pv_flag(UiState *u, int i) {
 
 static int pv_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
     bool click = e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT;
+    if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT)
+        u->play_pressed = hit_play((float)e->button.x, (float)e->button.y);
     bool key = e->type == SDL_KEYDOWN && !e->key.repeat;
     SDL_Keycode k = key ? e->key.keysym.sym : 0;
     float mx = click ? (float)e->button.x : 0, my = click ? (float)e->button.y : 0;
@@ -546,21 +548,22 @@ static int pv_event(UiState *u, const SDL_Event *e, int *song, int *diff) {
         if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) { stop_preview(u); play_sound(u->as, SND_CANCEL); return SCENE_TITLE; }
         if (k == SDLK_LEFT) select_move(u, -1, 0);
         if (k == SDLK_RIGHT) select_move(u, 1, 0);
-        /* focus cycles LOOP, LYRICS, KARAOKE (SHUFFLE is hidden without a playlist) */
-        if (k == SDLK_UP) { u->pv_focus = u->pv_focus == 1 ? 4 : u->pv_focus == 4 ? 3 : 1; u->menu_kbd = true; }
-        if (k == SDLK_DOWN) { u->pv_focus = u->pv_focus == 1 ? 3 : u->pv_focus == 3 ? 4 : 1; u->menu_kbd = true; }
+        /* focus cycles LOOP, SHUFFLE, LYRICS, KARAOKE */
+        if (k == SDLK_UP) { u->pv_focus = u->pv_focus <= 1 ? 4 : u->pv_focus - 1; u->menu_kbd = true; }
+        if (k == SDLK_DOWN) { u->pv_focus = u->pv_focus >= 4 ? 1 : u->pv_focus + 1; u->menu_kbd = true; }
         if (k == SDLK_SPACE) { toggle = u->pv_focus; u->menu_kbd = true; }
         if (k == SDLK_RETURN || k == SDLK_KP_ENTER) return start_game(u, song, diff);
     }
+    bool was_play = u->play_pressed;
+    if (click) u->play_pressed = false;
     if (click) {
         u->menu_kbd = false;
         if (my > 293 && my < 609 && mx < 160) select_move(u, -1, 0);
         else if (my > 293 && my < 609 && mx > 480) select_move(u, 1, 0);
         else if (my >= 742 && my < 835 && mx >= 25) { int i = (int)((mx - 25) / 120); if (i < 5 && mx - 25 - 120 * i < 109) toggle = i; }
-        else if (hit_play(mx, my)) return start_game(u, song, diff);
+        else if (hit_play(mx, my)) { if (was_play) return start_game(u, song, diff); }
         else if (hit_back(mx, my)) { stop_preview(u); play_sound(u->as, SND_CANCEL); return SCENE_TITLE; }
     }
-    if (toggle == 2) toggle = -1;   /* SHUFFLE: disabled while PLAYLIST is off (checkRandomEnable) */
     if (toggle >= 0) {
         bool *f = pv_flag(u, toggle);
         if (f) { *f = !*f; u->pv_focus = toggle; play_sound(u->as, SND_DECIDE); }
@@ -1249,10 +1252,10 @@ static void render_select(UiState *u) {
         /* ScenePVSelect with PLAYLIST off (the playlist editor is not ported, and off is the original's
            default): WindowPVSelect Render draws the "N SONG SELECTED" text (y 700), updateTouchPVProgram
            shows the TouchPVProgram play mark (112x104 at (265,612)) and checkRandomEnable enables
-           SHUFFLE only while GetPVModeFlg:0 (PLAYLIST) is set, so none of the three appear here.
+           SHUFFLE only while GetPVModeFlg:0 (PLAYLIST) is set. The text and play mark are left out; SHUFFLE stays
+           available (port deviation: without the playlist editor it would otherwise be unreachable).
            TouchPVLoopMode update: @0x717e0: 109x93 toggles at x = 25 + 120i, y = 742 */
         for (int i = 0; i < 5; i++) {
-            if (i == 2) continue;   /* SHUFFLE disabled: not drawn */
             char name[32];
             bool *f = pv_flag(u, i);
             snprintf(name, sizeof name, "%s_%s", k_pv_icon[i], f && *f ? "on" : "off");
@@ -1415,7 +1418,7 @@ static void render_result(UiState *u) {
     for (size_t i = 0; i < sizeof rows / sizeof *rows; i++) {
         /* the "♪" glyph sits 4 px further right in the original; the bitmap fallback font has no ♪,
            so draw the quaver sprite then */
-        if (i == 7 && !text_has_ttf()) spr_tl(r, &u->as->game1, "quaver_00", rows[i].lx - 6, rows[i].ly - 26, 255);
+        if (i == 7 && !text_has_glyph(0x266A)) spr_tl(r, &u->as->game1, "quaver_00", rows[i].lx - 6, rows[i].ly - 26, 255);
         else font_draw(r, rows[i].label, rows[i].lx + (i == 7 ? 4 : 0), rows[i].ly + 6, 2.6f, WHITE, -1);
         /* counters group thousands with a comma ("18,572") */
         int v = rows[i].value < 0 ? 0 : rows[i].value;

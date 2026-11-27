@@ -1129,7 +1129,8 @@ void game_render(Game *g) {
         /* NoteNormal render @0x22a38 (unless PANEL GUIDE is off): every active note up to its just frame
            shows its direction on its key, scaled by cnt/just (nothing below 0.25) about the panel's
            rect; the next target uses the _on panel plus guidecursor at key - (3,3), the others the
-           _off panel. Older notes are in front, so draw newest first. */
+           _off panel. Older notes are in front, so draw newest first. The panels (z -1.5 / -4.0) are in
+           front of the flower petals (TouchFlickBoard RenderGuideUp.. z about -1.2 / -1.3), so they go after it. */
         if (g->opt->guide_panel)
             for (int i = g->nnotes - 1; i >= 0; i--) {
                 const Note *n = &g->notes[i];
@@ -1160,10 +1161,11 @@ void game_render(Game *g) {
         static const char *labels[3] = {"RESUME", "RETRY", "MUSIC SELECT"};
         const Atlas *u1 = &as->ui1;
         /* TouchBack / TouchRetry Render (@0x6e27e): the same m-size button as music select PLAY: base at
-           pos, pulsing additive face (pos.x+1, pos.y+0.5, 310, 68.5) drawn 1 px left and 2 px wider, brackets on
-           every button at (pos.x, pos.y+1) and (pos.x+1+271*s, pos.y+1); all rects scaled 1.05x about their
-           centre while pressed. The face counter keeps running while paused. */
-        Uint8 v = pause_pulse(SDL_GetTicks() / 17u);
+           pos; pulsing face (CoordinateColor, colour = alpha = v, blend 1) at (pos.x+1, pos.y+0.5, 310, 68.5),
+           drawn 1 px left and 2 px wider; brackets on every button at (pos.x, pos.y+1) and
+           (pos.x+1+271*s, pos.y+1); all rects scaled 1.05x about their centre while pressed. The face
+           counter steps at 30 Hz (like the menu ticks) and keeps running while paused. */
+        Uint8 v = pause_pulse(SDL_GetTicks() / 33u);
         for (int i = 0; i < 3; i++) {
             float y = k_pause_y[i];
             bool down = i == g->pause_press || (g->pause_kbd && i == g->pause_focus);

@@ -232,7 +232,7 @@ void game_result(const Game *g, GameResult *out);
 void font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scale, SDL_Color col, int align);
 void bitmap_font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scale, SDL_Color col, int align);
 bool text_init(const char *font_path);   /* NULL = search; "none" = bitmap only */
-bool text_has_ttf(void);                  /* false: only the ASCII bitmap font is available */
+bool text_has_glyph(Uint32 cp);           /* false: no TrueType font, or it lacks this code point */
 void text_quit(void);
 void digits_draw(SDL_Renderer *ren, const Atlas *a, const char *prefix, long value, float right_x, float cy,
                  float scale, bool commas, int comma_index);
