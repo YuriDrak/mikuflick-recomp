@@ -28,6 +28,8 @@ void log_msg(const char *fmt, ...) {
     va_start(ap, fmt);
 #ifdef __ANDROID__
     __android_log_vprint(ANDROID_LOG_INFO, "mikuflick", fmt, ap);   /* adb logcat -s mikuflick */
+#elif defined(MF_IOS)
+    SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_INFO, fmt, ap);   /* NSLog: device log/Console */
 #else
     fputs("[mikuflick] ", stderr);
     vfprintf(stderr, fmt, ap);
