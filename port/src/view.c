@@ -85,7 +85,16 @@ void view_present(SDL_Renderer *ren, SDL_Texture *backdrop) {
     if (!V.ok) { SDL_RenderPresent(ren); return; }
     update_layout(ren);
     bool bars = V.dst.w < V.out_w - 1 || V.dst.h < V.out_h - 1;
-    if (bars) {   /* two linear downscales make a cheap, stable blur */
+#ifdef MF_IOS
+    /* OLED phones: pure black bars during rhythm gameplay so moving blur never distracts,
+       and a subtle dim blur only on menus. */
+    bool draw_blur = bars && !backdrop;
+    const Uint8 blur_mod = 48;
+#else
+    bool draw_blur = bars;
+    const Uint8 blur_mod = 120;
+#endif
+    if (draw_blur) {   /* two linear downscales make a cheap, stable blur */
         SDL_SetRenderTarget(ren, V.blur1);
         SDL_RenderCopy(ren, backdrop ? backdrop : V.scene, NULL, NULL);
         SDL_SetRenderTarget(ren, V.blur2);
@@ -94,12 +103,12 @@ void view_present(SDL_Renderer *ren, SDL_Texture *backdrop) {
     SDL_SetRenderTarget(ren, NULL);
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
-    if (bars) {
+    if (draw_blur) {
         float c = fmaxf((float)V.out_w / LOGICAL_W, (float)V.out_h / LOGICAL_H);
         SDL_Rect cover = {0, 0, (int)lroundf(LOGICAL_W * c), (int)lroundf(LOGICAL_H * c)};
         cover.x = (V.out_w - cover.w) / 2;
         cover.y = (V.out_h - cover.h) / 2;
-        SDL_SetTextureColorMod(V.blur2, 120, 120, 120);
+        SDL_SetTextureColorMod(V.blur2, blur_mod, blur_mod, blur_mod);
         SDL_RenderCopy(ren, V.blur2, NULL, &cover);
     }
     SDL_RenderCopy(ren, V.scene, NULL, &V.dst);

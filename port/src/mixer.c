@@ -106,7 +106,7 @@ bool mixer_init(void) {
     want.freq = AUDIO_RATE;
     want.format = AUDIO_S16SYS;
     want.channels = 2;
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(MF_IOS)
     want.samples = 512;    /* lower output latency; the clock below adapts to what the device grants */
 #else
     want.samples = 1024;

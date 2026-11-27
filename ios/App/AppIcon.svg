@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 108 108">
+  <!-- iOS version of the Android launcher icon (android/app/src/main/res/drawable/ic_launcher.xml):
+       the same teal and note, full-bleed because iOS masks the corners itself, with the note scaled
+       108/92 so it fills the square as it fills Android's 92-unit tile. No SEGA/Crypton artwork.
+       Rendered to Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png. -->
+  <rect width="108" height="108" fill="#1BB5B0"/>
+  <path fill="#FFFFFF" transform="translate(54 54) scale(1.173913) translate(-54 -54)"
+        d="M46,28l30,-6v44a10,8 0,1 1,-6 -7.3V36l-18,3.6V74a10,8 0,1 1,-6 -7.3z"/>
+</svg>
