@@ -172,6 +172,7 @@ typedef struct {
     Atlas logos[3];         /* logo_sega, logo_crypton, logo_cri */
     Atlas help[2], credits; /* help_01/02, credits_en */
     Atlas saisei;           /* PV select: play mark on the jacket */
+    Atlas ui9;              /* UI_tex_09 (no plist): DISPLAY page aspect and pause previews */
     Atlas launch;
     Pcm sounds[NUM_SOUNDS];
 } Assets;
@@ -187,8 +188,9 @@ typedef struct {
     bool fail_sound;         /* StatusData IsDisableFailSound inverted */
     bool left_hand;          /* HANDEDNESS: tension gauge on the right */
     int keyboard;            /* KEYBOARD: 0 original, 1 full romaji, 2 romaji+hiragana */
-    bool flower;             /* DISPLAY: flick "flower" guide around a held key */
-    bool guide_panel;        /* DISPLAY: guide cursor/arrow on the next key */
+    bool flower;             /* KEYBOARD: flick "flower" guide around a held key */
+    bool guide_panel;        /* KEYBOARD: guide cursor/arrow on the next key */
+    bool pause_button;       /* DISPLAY PAUSE: draw the in-game pause button (TouchPauseEnable) */
     /* PV viewer (ScenePVSelect / ScenePVView): set by the UI before starting playback */
     bool pv_mode, pv_lyrics, pv_karaoke, pv_loop, pv_shuffle;
     bool autoplay;           /* debug: perfect autoplay */
@@ -214,7 +216,7 @@ typedef struct {
     int counts[6];           /* index = grade 1..5 (WORST..COOL) */
     int total_notes, max_combo, stage_score, combo_score, interlude_hits, total_interlude;
     bool game_over;
-    int rank;                /* 0 PERFECT .. 5 C(not clear), 6 game over */
+    int rank;                /* 0 PERFECT, 1..4 S..C, 5 D (not clear), 6 E (game over) */
 } GameResult;
 
 Game *game_create(SDL_Renderer *ren, Assets *as, const GameData *gd, const Options *opt, int song, int diff);
@@ -230,6 +232,7 @@ void game_result(const Game *g, GameResult *out);
 void font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scale, SDL_Color col, int align);
 void bitmap_font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scale, SDL_Color col, int align);
 bool text_init(const char *font_path);   /* NULL = search; "none" = bitmap only */
+bool text_has_ttf(void);                  /* false: only the ASCII bitmap font is available */
 void text_quit(void);
 void digits_draw(SDL_Renderer *ren, const Atlas *a, const char *prefix, long value, float right_x, float cy,
                  float scale, bool commas, int comma_index);

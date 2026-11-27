@@ -9,6 +9,7 @@
 
 void save_load(SaveData *s, const char *dir) {
     memset(s, 0, sizeof *s);
+    s->opt.pause_button = true;   /* saves written before DISPLAY PAUSE existed */
     for (int i = 0; i < MAX_SONGS; i++)
         for (int d = 0; d < NUM_DIFF; d++) s->rec[i][d].rank = -1;
     if (mkdir(dir, 0755) != 0 && errno != EEXIST) log_msg("cannot create %s", dir);
@@ -31,9 +32,10 @@ void save_load(SaveData *s, const char *dir) {
             else if (!strcmp(key, "fail_sound")) o->fail_sound = fv != 0;
             else if (!strcmp(key, "input_timing")) o->input_timing = (int)fv;
             else if (!strcmp(key, "left_hand")) o->left_hand = fv != 0;
-            else if (!strcmp(key, "keyboard")) o->keyboard = (int)fv;
+            else if (!strcmp(key, "keyboard")) o->keyboard = fv >= 0 && fv <= 2 ? (int)fv : 0;
             else if (!strcmp(key, "flower")) o->flower = fv != 0;
             else if (!strcmp(key, "guide_panel")) o->guide_panel = fv != 0;
+            else if (!strcmp(key, "pause_button")) o->pause_button = fv != 0;
         }
     }
     fclose(f);
@@ -47,10 +49,10 @@ void save_write(const SaveData *s) {
     fprintf(f, "# mikuflick port save: rec song diff score best_rank max_combo cleared\n");
     if (s->has_opt) {
         const Options *o = &s->opt;
-        fprintf(f, "opt bgm_volume %.2f\nopt se_volume %.2f\nopt fail_sound %d\nopt input_timing %d\n", o->bgm_volume,
+        fprintf(f, "opt bgm_volume %.4f\nopt se_volume %.4f\nopt fail_sound %d\nopt input_timing %d\n", o->bgm_volume,
                 o->se_volume, o->fail_sound, o->input_timing);
-        fprintf(f, "opt left_hand %d\nopt keyboard %d\nopt flower %d\nopt guide_panel %d\n", o->left_hand, o->keyboard,
-                o->flower, o->guide_panel);
+        fprintf(f, "opt left_hand %d\nopt keyboard %d\nopt flower %d\nopt guide_panel %d\nopt pause_button %d\n",
+                o->left_hand, o->keyboard, o->flower, o->guide_panel, o->pause_button);
     }
     for (int i = 0; i < MAX_SONGS; i++)
         for (int d = 0; d < NUM_DIFF; d++) {

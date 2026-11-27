@@ -83,6 +83,8 @@ struct Game {
     float gauge;             /* DAT_00163088 */
     bool game_over, interlude_mode, paused, finished, quit, retry;
     int pause_focus;
+    int pause_press;         /* pause button held by the pointer, -1 none */
+    bool pause_kbd;          /* keyboard focus shown (the original is touch-only) */
     char lyric[256];         /* PV mode: current lyric line (op 3 cue) */
     float board_alpha;
 
@@ -138,6 +140,24 @@ static int digit_at(const char *s, int pos) {
         s += n;
     }
     return -1;
+}
+
+/* the pause buttons' face pulse and press scaling (same as the menu buttons in ui.c) */
+static Uint8 pause_pulse(unsigned counter) {
+    int i = (int)(counter % 22);
+    if (i > 10) i = 21 - i;
+    return (Uint8)(255.0f * 0.85f * powf(0.98f, (float)i) + 0.5f);
+}
+
+static void pause_scale(float s, float *x, float *y, float *w, float *h) {
+    *x -= *w * (s - 1) * 0.5f; *y -= *h * (s - 1) * 0.5f; *w *= s; *h *= s;
+}
+
+static void enter_pause(Game *g, bool on) {
+    g->paused = on;
+    g->pause_press = -1;
+    g->pause_kbd = false;
+    mixer_music_pause(on);
 }
 
 /* ---------------------------------------------------------------- effects */
@@ -624,6 +644,11 @@ static int held_arrow(void) {
 /* WindowGameWindow pauseGame @0x39138: TouchBack(RESUME) y=574, TouchRetry(RETRY) y=656,
    TouchRetry No2 (MUSIC SELECT) y=740; menubutton_m at x=164 */
 static const float k_pause_y[3] = {574, 656, 740};
+static int pause_hit(float mx, float my) {
+    for (int i = 0; i < 3; i++)
+        if (mx >= 164 && mx < 164 + 324 && my >= k_pause_y[i] && my < k_pause_y[i] + 82) return i;
+    return -1;
+}
 
 static void pause_choose(Game *g, int i) {
     play_sound(g->as, SND_HIT);
@@ -636,8 +661,7 @@ SDL_Texture *game_backdrop(const Game *g) { return g ? video_texture(g->video) :
 
 void game_pause(Game *g) {
     if (!g || !g->loaded || g->finished || g->paused || g->opt->pv_mode) return;
-    g->paused = true;
-    mixer_music_pause(true);
+    enter_pause(g, true);
 }
 
 void game_event(Game *g, const SDL_Event *e) {
@@ -659,11 +683,11 @@ void game_event(Game *g, const SDL_Event *e) {
     if (e->type == SDL_KEYDOWN && !e->key.repeat) {
         SDL_Keycode k = e->key.keysym.sym;
         if (k == SDLK_ESCAPE || k == SDLK_p) {
-            g->paused = !g->paused;
-            mixer_music_pause(g->paused);
+            enter_pause(g, !g->paused);
             return;
         }
         if (g->paused) { /* pause menu: RESUME / RETRY / MUSIC SELECT */
+            if (k == SDLK_UP || k == SDLK_DOWN) g->pause_kbd = true;
             if (k == SDLK_UP) g->pause_focus = (g->pause_focus + 2) % 3;
             if (k == SDLK_DOWN) g->pause_focus = (g->pause_focus + 1) % 3;
             if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) pause_choose(g, g->pause_focus);
@@ -685,11 +709,16 @@ void game_event(Game *g, const SDL_Event *e) {
         }
         return;
     }
-    if (g->paused) {
-        if (e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT) {
+    if (g->paused) {   /* TouchBack / TouchRetry: pressed on down, chosen on release over the same button */
+        if ((e->type == SDL_MOUSEBUTTONDOWN || e->type == SDL_MOUSEBUTTONUP) && e->button.button == SDL_BUTTON_LEFT) {
             float mx = (float)e->button.x, my = (float)e->button.y;
-            for (int i = 0; i < 3; i++)
-                if (mx >= 164 && mx < 164 + 324 && my >= k_pause_y[i] && my < k_pause_y[i] + 82) pause_choose(g, i);
+            int hit = pause_hit(mx, my);
+            if (e->type == SDL_MOUSEBUTTONDOWN) { g->pause_press = hit; g->pause_kbd = false; }
+            else {
+                int was = g->pause_press;
+                g->pause_press = -1;
+                if (hit >= 0 && hit == was) pause_choose(g, hit);
+            }
         }
         return;
     }
@@ -700,7 +729,7 @@ void game_event(Game *g, const SDL_Event *e) {
     }
     if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT && e->button.which != SDL_TOUCH_MOUSEID) {
         float x = (float)e->button.x, y = (float)e->button.y;
-        if (x > 570 && y > 890) { g->paused = true; mixer_music_pause(true); return; } /* pause button */
+        if (x > 570 && y > 890) { enter_pause(g, true); return; } /* pause button */
         press(g, PTR_MOUSE, 0, x, y, key_at(g, x, y));
     } else if (e->type == SDL_MOUSEMOTION && e->motion.which != SDL_TOUCH_MOUSEID) {
         Pointer *p = ptr_find(g, PTR_MOUSE, 0);
@@ -738,6 +767,7 @@ Game *game_create(SDL_Renderer *ren, Assets *as, const GameData *gd, const Optio
     g->diff = diff;
     g->gauge = 128.0f;       /* NoteManager Reset */
     g->board_alpha = 1.0f;
+    g->pause_press = -1;
     g->bpm = gd->songs[song].bpm;
     g->delay_ms = (int)(center_time(g->bpm) * 1000.0f);
     g->last_grade_t = -10;
@@ -809,11 +839,21 @@ static void draw_kana(Game *g, int ch, bool playable, float x, float y, Uint8 al
     spr_tl_rect(g->ren, &g->as->kana_tex[sheet], &src, x, y, 78, 78, alpha);
 }
 
-/* guidepanel_on_0N by flick direction (0 tap,1 up,2 right,3 down,4 left) */
-static const char *guide_frame(int dir) {
-    static const char *f[5] = {"guidepanel_on_00", "guidepanel_on_01", "guidepanel_on_04", "guidepanel_on_02", "guidepanel_on_03"};
-    return f[dir < 0 || dir > 4 ? 0 : dir];
+/* s_tblKeyGuideTexIdx @0x139460 (guidepanel_off) / _Next @0x139474 (guidepanel_on), indexed by flick
+   code (0 tap,1 up,2 right,3 down,4 left); the sprites are ordered tap, up, down, left, right */
+static const char *guide_frame(int dir, bool next) {
+    static const char *f[2][5] = {
+        {"guidepanel_off_00", "guidepanel_off_01", "guidepanel_off_04", "guidepanel_off_02", "guidepanel_off_03"},
+        {"guidepanel_on_00", "guidepanel_on_01", "guidepanel_on_04", "guidepanel_on_02", "guidepanel_on_03"}};
+    return f[next ? 1 : 0][dir < 0 || dir > 4 ? 0 : dir];
 }
+
+/* s_tblRainbow @0x139310: 28 colours (floats / 255) for climax notes */
+static const Uint8 k_rainbow[28][3] = {
+    {134, 253, 135}, {164, 253, 135}, {194, 253, 135}, {224, 253, 135}, {255, 254, 136}, {255, 244, 121}, {255, 230, 106},
+    {255, 218, 91},  {255, 202, 74},  {255, 187, 118}, {255, 172, 152}, {255, 157, 200}, {255, 136, 254}, {235, 144, 254},
+    {215, 152, 254}, {190, 160, 254}, {168, 168, 255}, {143, 175, 255}, {118, 182, 255}, {93, 189, 255},  {78, 199, 254},
+    {93, 211, 254},  {108, 225, 254}, {123, 239, 254}, {136, 254, 254}, {136, 254, 224}, {136, 254, 194}, {136, 254, 164}};
 
 static double ticks_since(const Game *g, double t0) { return (g->t - t0) * 30.0; }
 
@@ -871,20 +911,25 @@ static const Atlas *key_atlas(Game *g) {
     return &g->as->game2;
 }
 
-/* flick "flower" around a held key: RenderGuideUp/Down/Left/Right @0x6f228.. */
+/* flick "flower" around a held key: -[TouchFlickBoard RenderGuide:] @0x6f860 with the current flick
+   direction. Direction 0 (no flick yet): all petals unlit, only with the FLOWER option on. Once the
+   finger has a direction: only that petal, lit, whatever the option (when the key has a character
+   there). RenderGuideUp/Down/Left/Right @0x6f228..: flickguide_*_00..03 (TP 312..315, +4 lit) and the
+   e_GuideCharPictIdx glyph (fgcharacter_ori, TP 370 + idx); the table is indexed by flick code. */
 static void draw_flower(Game *g, int key, int dir) {
     const BoardKey *b = &g->gd->board[key];
     float px = (float)b->px, py = (float)b->py;
     static const float petal[4][2] = {{7, -109}, {7, 82}, {-127, 3}, {99, 3}};  /* up, down, left, right */
     static const float glyph[4][2] = {{36, -85}, {36, 136}, {-90, 26}, {160, 26}};
-    static const int guide_slot[4] = {1, 3, 4, 2};  /* e_GuideCharPictIdx {centre,up,right,down,left} */
     static const int dir_of[4] = {1, 3, 4, 2};      /* flick code of each petal */
+    if (dir == 0 && !g->opt->flower) return;
     const Atlas *a2 = key_atlas(g);
     for (int p = 0; p < 4; p++) {
-        int gi = g->gd->guide[key][guide_slot[p]];
+        if (dir != 0 && dir != dir_of[p]) continue;
+        int gi = g->gd->guide[key][dir_of[p]];
         if (gi < 0) continue;
         char name[32];
-        bool on = (dir == dir_of[p]);
+        bool on = dir != 0;
         snprintf(name, sizeof name, "flickguide_%s_%02d", on ? "on" : "off", p);
         spr_tl(g->ren, &g->as->game1, name, px + petal[p][0], py + petal[p][1], 255);
         snprintf(name, sizeof name, "fgcharacter_ori_%02d", gi);
@@ -905,8 +950,9 @@ void game_render(Game *g) {
     }
 
     if (g->opt->pv_mode) {
-        /* ScenePVView: full-screen movie; NoteManager render_Lyrics draws the line at y=896 (shadow 898) */
-        if (g->lyric[0]) font_draw(r, g->lyric, 320, 880, 2.8f, (SDL_Color){255, 255, 255, 255}, 0);
+        /* ScenePVView: full-screen movie; NoteManager render_Lyrics @0xda64 draws the text texture at y=896 (shadow 898,
+           x 15, z -5.1); text textures put the glyph tops ~6 px below their y, font_draw takes the glyph top */
+        if (g->lyric[0]) font_draw(r, g->lyric, 320, 902, 2.8f, (SDL_Color){255, 255, 255, 255}, 0);
         return;
     }
     const Atlas *g1 = &as->game1, *ef = &as->effect1;
@@ -939,15 +985,31 @@ void game_render(Game *g) {
     /* insidewhirl: RenderTexRot centred (68,481) */
     spr_rot(r, g1, "insidewhirl", JUDGE_CX, LANE_CY, (float)fmod(tick * 3.0, 360.0), 1.0f, 200);
 
-    /* tension: microphone stand at (4,572); lit stand clipped from the bottom by the gauge */
-    float mic_x = g->opt->left_hand ? 490.0f : 4.0f;   /* HANDEDNESS: right-side gauge (x=490 set) */
-    spr_tl(r, g1, "microphonemeter_00", mic_x, 572, 255);
+    /* tension (WindowGameWindow Render @0x3ad26): microphonemeter_00 (dark stand) and _01 (glowing
+       outline) both whole at y 572, then the _02 fill clipped from the bottom: fill = 362*gauge/256 + 0.5
+       px (362 from the stale e_SystemPictTbl entry), drawn at y = 943 - fill. Right-handed: x 4 / 4 / 15.05;
+       the left-handed layout mirrors it with RenderTexClipReverse at x 490 / 521 / 534. */
     {
-        const Frame *f = atlas_find(g1, "microphonemeter_01");
-        if (f) {
-            int h = (int)(f->r.h * (g->gauge / 256.0f));
-            SDL_Rect src = {f->r.x, f->r.y + f->r.h - h, f->r.w, h};
-            if (h > 0) spr_tl_rect(r, g1, &src, mic_x, 572 + (float)(f->r.h - h), (float)f->r.w, (float)h, 255);
+        bool mirror = g->opt->left_hand;
+        SDL_RendererFlip fl = mirror ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
+        static const char *mic[2] = {"microphonemeter_00", "microphonemeter_01"};
+        static const float mic_x[2][2] = {{4, 4}, {490, 521}};
+        for (int i = 0; i < 2; i++) {
+            const Frame *f = atlas_find(g1, mic[i]);
+            if (!f) continue;
+            SDL_FRect d = {mic_x[mirror][i], 572, (float)f->r.w, (float)f->r.h};
+            SDL_SetTextureAlphaMod(g1->tex, ui_a);
+            SDL_RenderCopyExF(r, g1->tex, &f->r, &d, 0, NULL, fl);
+        }
+        const Frame *f = atlas_find(g1, "microphonemeter_02");
+        float fill = 362.0f * (float)(int)g->gauge / 256.0f + 0.5f;
+        int fh = (int)fill;
+        if (f && fh > 0) {
+            if (fh > f->r.h) fh = f->r.h;
+            SDL_Rect src = {f->r.x, f->r.y + f->r.h - fh, f->r.w, fh};
+            SDL_FRect d = {mirror ? 534.0f : 15.05f, 943.0f - fill, (float)f->r.w, (float)fh};
+            SDL_SetTextureAlphaMod(g1->tex, ui_a);
+            SDL_RenderCopyExF(r, g1->tex, &src, &d, 0, NULL, fl);
         }
     }
 
@@ -963,10 +1025,27 @@ void game_render(Game *g) {
             if (q) spr_tl(r, g1, n->active ? "quaver_00" : "quaver_01", n->x - q->r.w * 0.5f, LANE_CY - q->r.h * 0.5f, a);
             continue;
         }
-        if (n->crimax && n->active)
-            spr_rot(r, g1, "emphasiscircle", n->x, LANE_CY, (float)fmod(tick * 6.0, 360.0), 1.0f, 230);
         /* option (small kana) notes are drawn 32 px right of the base glyph position */
-        draw_kana(g, n->ch, n->playable, n->x - 39 + (n->small ? 32 : 0), NOTE_Y, a);
+        float gx = n->x - 39 + (n->small ? 32 : 0);
+        if (n->crimax && n->active && g->combo >= 100) {
+            /* NoteNormal render @0x2269e: a climax note at combo >= 100 is tinted with
+               s_tblRainbow[(m_CrimaxCnt + 10) % 28] (m_CrimaxCnt counts ticks like m_Cnt) */
+            const Uint8 *c = k_rainbow[((n->cnt + 10) % 28 + 28) % 28];
+            SDL_Texture *kt = g->as->kana_tex[(g->gd->kana[n->ch].tex >= 6 ? 2 : 0) + (n->playable ? 1 : 0)].tex;
+            if (kt) SDL_SetTextureColorMod(kt, c[0], c[1], c[2]);
+            draw_kana(g, n->ch, n->playable, gx, NOTE_Y, a);
+            if (kt) SDL_SetTextureColorMod(kt, 255, 255, 255);
+        } else {
+            draw_kana(g, n->ch, n->playable, gx, NOTE_Y, a);
+        }
+        /* NoteNormal render @0x2292a: every active note carries the emphasiscircle ring, centred at
+           pos + (1,39), angle pi - m_Rot/100 rad; NoteNormal exec: m_Rot = (m_Rot + 21) % 360 per tick */
+        if (n->active && !n->small) {
+            int rot = (int)(((long)n->cnt * 21) % 360);
+            if (rot < 0) rot += 360;
+            float deg = (float)((M_PI - rot / 100.0) * 180.0 / M_PI);
+            spr_rot(r, g1, "emphasiscircle", n->x + 1, NOTE_Y + 39, deg, 1.0f, 255);
+        }
     }
 
     /* last-note direction (inputguide_0N at 26,440) and the timing ring (inputtarget/inputperfect at 69,482) */
@@ -975,7 +1054,9 @@ void game_render(Game *g) {
         if (g->notes[i].active && g->notes[i].type == NOTE_NORMAL && g->notes[i].started) { next = &g->notes[i]; break; }
     if (next && next->cnt >= next->just - 11 && next->cnt <= next->just) {
         char name[32];
-        static const int guide_of_dir[5] = {0, 1, 2, 3, 4};
+        /* s_tblLastNoteTexIdx @0x138f38 = TP frames {278, 279, 282, 280, 281}: the sprites are ordered
+           tap, up, down, left, right while flick codes are tap, up, right, down, left */
+        static const int guide_of_dir[5] = {0, 1, 4, 2, 3};
         snprintf(name, sizeof name, "inputguide_%02d", guide_of_dir[next->flick]);
         spr_tl(r, ef, name, 26, 440, 255);
         int dist = next->just - next->cnt + 1;
@@ -1044,17 +1125,30 @@ void game_render(Game *g) {
             snprintf(name, sizeof name, "flickpanel_ori_%s_%02d", held_key == k ? "on" : "off", k);
             spr_tl(r, key_atlas(g), name, (float)b->px, (float)b->py, ui_a);
         }
-        /* NoteNormal render: guidecursor + direction panel on the key of the next target note */
-        if (next && held_key < 0 && g->opt->guide_panel) {
-            const BoardKey *b = &g->gd->board[next->board];
-            bool near = next->cnt >= next->just - 11;
-            spr_tl(r, g1, guide_frame(next->flick), (float)b->px, (float)b->py, near ? 255 : 170);
-            spr_tl(r, g1, "guidecursor", (float)b->px, (float)b->py, 255);
-        }
-        if (held_key >= 0 && g->opt->flower) draw_flower(g, held_key, held_dir);
+        if (held_key >= 0) draw_flower(g, held_key, held_dir);
+        /* NoteNormal render @0x22a38 (unless PANEL GUIDE is off): every active note up to its just frame
+           shows its direction on its key, scaled by cnt/just (nothing below 0.25) about the panel's
+           rect; the next target uses the _on panel plus guidecursor at key - (3,3), the others the
+           _off panel. Older notes are in front, so draw newest first. */
+        if (g->opt->guide_panel)
+            for (int i = g->nnotes - 1; i >= 0; i--) {
+                const Note *n = &g->notes[i];
+                if (n->type != NOTE_NORMAL || !n->active || !n->started || n->dead || n->small || n->cnt > n->just)
+                    continue;
+                const BoardKey *b = &g->gd->board[n->board];
+                bool is_next = n == next;
+                if (is_next) spr_tl(r, g1, "guidecursor", (float)b->px - 3, (float)b->py - 3, 255);
+                float s = n->just > 0 ? (float)n->cnt / (float)n->just : 1.0f;
+                if (s < 0.25f) continue;
+                const char *pn = guide_frame(n->flick, is_next);
+                const Frame *pf = atlas_find(g1, pn);
+                if (!pf) continue;
+                float fw = (float)pf->r.w, fh = (float)pf->r.h;
+                spr_tl_wh(r, g1, pn, (float)b->px + fw * (1 - s) * 0.5f, (float)b->py + fh * (1 - s) * 0.5f, fw * s, fh * s, 255);
+            }
     }
 
-    spr_tl(r, g1, "pausebutton", 575, 899, 220);
+    if (g->opt->pause_button) spr_tl(r, g1, "pausebutton", 575, 899, 220);   /* DISPLAY PAUSE: INVISIBLE hides it, the touch area stays */
 
     if (g->paused) {
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
@@ -1065,15 +1159,29 @@ void game_render(Game *g) {
         spr_tl_wh(r, g1, "menugradation", 0, 374, 640, mg ? (float)mg->r.h : 586, 255);
         static const char *labels[3] = {"RESUME", "RETRY", "MUSIC SELECT"};
         const Atlas *u1 = &as->ui1;
+        /* TouchBack / TouchRetry Render (@0x6e27e): the same m-size button as music select PLAY: base at
+           pos, pulsing additive face (pos.x+1, pos.y+0.5, 310, 68.5) drawn 1 px left and 2 px wider, brackets on
+           every button at (pos.x, pos.y+1) and (pos.x+1+271*s, pos.y+1); all rects scaled 1.05x about their
+           centre while pressed. The face counter keeps running while paused. */
+        Uint8 v = pause_pulse(SDL_GetTicks() / 17u);
         for (int i = 0; i < 3; i++) {
-            float x = 164, y = k_pause_y[i];
-            spr_tl(r, u1, "menubutton_m_base", x, y, 255);
-            spr_tl(r, u1, "menubutton_m_off", x + 7, y + 7, 255);
-            font_draw(r, labels[i], x + 162, y + 26, 3.2f, (SDL_Color){255, 255, 255, 255}, 0);
-            if (i == g->pause_focus) {
-                spr_tl(r, u1, "parenthesis_00", x + 8, y + 7, 255);
-                spr_tl(r, u1, "parenthesis_01", x + 324 - 8 - 39, y + 7, 255);
-            }
+            float y = k_pause_y[i];
+            bool down = i == g->pause_press || (g->pause_kbd && i == g->pause_focus);
+            float s = down ? 1.05f : 1.0f;
+            float bx = 164, by = y, bw = 324, bh = 82;
+            float fx = 165, fy = y + 0.5f, fw = 310, fh = 68.5f;
+            float px = 165, py = y + 1, pw = 39, ph = 68;
+            pause_scale(s, &bx, &by, &bw, &bh);
+            pause_scale(s, &fx, &fy, &fw, &fh);
+            pause_scale(s, &px, &py, &pw, &ph);
+            if (down) px -= 7;
+            spr_tl_wh(r, u1, "menubutton_m_base", bx, by, bw, bh, 255);
+            SDL_SetTextureColorMod(u1->tex, v, v, v);
+            spr_tl_wh(r, u1, down ? "menubutton_m_on" : "menubutton_m_off", fx - 1, fy, fw + 2, fh, v);
+            SDL_SetTextureColorMod(u1->tex, 255, 255, 255);
+            font_draw(r, labels[i], 326, y + 40 - 18 * s, 3.25f * s, (SDL_Color){255, 255, 255, 255}, 0);
+            spr_tl_wh(r, u1, "parenthesis_00", px - 1, py, pw, ph, 255);
+            spr_tl_wh(r, u1, "parenthesis_01", px + 271 * s, py, pw, ph, 255);
         }
     }
 }

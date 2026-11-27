@@ -327,7 +327,7 @@ int main(int argc, char **argv) {
     const char *gamedata = "port/data/gamedata.txt";
     char datadir[1024] = "";
     Options opt = {.input_timing = 0, .bgm_volume = 1.0f, .se_volume = 1.0f, .fail_sound = true, .left_hand = false,
-                   .keyboard = 0, .flower = true, .guide_panel = true, .autoplay = false, .autoplay_input = false,
+                   .keyboard = 0, .flower = true, .guide_panel = true, .pause_button = true, .autoplay = false, .autoplay_input = false,
                    .start_song = -1, .start_diff = 1};
     bool cli_timing = false, cli_bgm = false, cli_se = false, cli_fail = false;
     bool exit_after = false, fullscreen = false;
@@ -497,6 +497,7 @@ int main(int argc, char **argv) {
         opt.keyboard = save.opt.keyboard;
         opt.flower = save.opt.flower;
         opt.guide_panel = save.opt.guide_panel;
+        opt.pause_button = save.opt.pause_button;
         mixer_set_master(1.0f, opt.se_volume);
     }
     UiState *ui = ui_create(ren, &as, &gd, &save, &opt);

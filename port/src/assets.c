@@ -36,6 +36,7 @@ bool assets_load(Assets *as, SDL_Renderer *ren, const GameData *gd, const char *
     atlas_load(&as->help[1], ren, appdir, "help_02");
     atlas_load(&as->credits, ren, appdir, "credits_en");
     atlas_load(&as->saisei, ren, appdir, "saisei");
+    atlas_load(&as->ui9, ren, appdir, "UI_tex_09");
     /* KEYBOARD variants (SystemTexture LoadBoardTex): same layout as game_tex_02, no plist of their own */
     static const char *kb[2] = {"game_tex_02_fullroman", "game_tex_02_romanhira"};
     for (int i = 0; i < 2; i++)
@@ -60,7 +61,7 @@ void assets_free(Assets *as) {
                     &as->bg_select, &as->bg_result, &as->kana_tex[0], &as->kana_tex[1], &as->kana_tex[2],
                     &as->kana_tex[3], &as->logos[0], &as->logos[1], &as->logos[2], &as->launch, &as->ui3,
                     &as->ui4, &as->bg_options, &as->help[0], &as->help[1], &as->credits, &as->game2_kb[0],
-                    &as->game2_kb[1], &as->saisei};
+                    &as->game2_kb[1], &as->saisei, &as->ui9};
     for (size_t i = 0; i < sizeof all / sizeof *all; i++) atlas_free(all[i]);
     for (int i = 0; i < NUM_SOUNDS; i++) pcm_free(&as->sounds[i]);
 }

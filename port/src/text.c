@@ -124,7 +124,9 @@ void font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scal
     Entry *e = lookup(ren, text, px, col, false);
     Entry *sh = lookup(ren, text, px, (SDL_Color){0, 0, 0, 255}, true);
     if (!e) { bitmap_font_draw(ren, text, x, y, scale, col, align); return; }
-    float w = (float)e->w, h = (float)e->h;
+    /* the original's iOS UI font is narrower than M+ 1p Bold: measured against device screenshots
+       (title menu, result labels) the same strings come out 7-11% wider, so condense to match */
+    float w = (float)e->w * 0.93f, h = (float)e->h;
     float dx = align < 0 ? x : align == 0 ? x - w / 2 : x - w;
     float dy = y - h * 0.2f;   /* TTF line box starts above the cap height */
     if (sh) {
@@ -136,6 +138,8 @@ void font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scal
     SDL_SetTextureAlphaMod(e->tex, col.a);
     SDL_RenderCopyF(ren, e->tex, NULL, &d);
 }
+
+bool text_has_ttf(void) { return T.ok; }
 
 void text_quit(void) {
     for (int i = 0; i < CACHE; i++) if (T.cache[i].tex) SDL_DestroyTexture(T.cache[i].tex);
