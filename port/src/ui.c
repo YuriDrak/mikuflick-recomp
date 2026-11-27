@@ -1434,7 +1434,14 @@ static void render_title(UiState *u) {
     /* RenderTitle: bob = 5*sin(BlinkTime*113.04) (radians, aliases to a ~3.7 s cycle); eyeAction: blink every 200 ticks */
     float bob = (float)(5.0 * sin((double)u->blink * 113.04));
     spr_tl(r, u5, "miku", -10, bob - 3, 255);
-    { unsigned b = u->blink % 200; if (u->tstate >= 9 && b >= 1 && b < 5) spr_tl(r, u5, b < 3 ? "eye_00" : "eye_01", 320, bob + 109, 255); }
+    { unsigned b = u->blink % 200;
+      const Frame *ef = atlas_find(u5, b < 3 ? "eye_00" : "eye_01");
+      if (u->tstate >= 9 && b >= 1 && b < 5 && ef) {
+          /* port: inset by one texel; at the fractional bob y the linear filter would blend in the empty
+             atlas row above the eyes and draw a dark edge around the patch (the patch matches the face) */
+          SDL_Rect in = {ef->r.x + 1, ef->r.y + 1, ef->r.w - 2, ef->r.h - 2};
+          spr_tl_rect(r, u5, &in, 321, bob + 110, (float)in.w, (float)in.h, 255);
+      } }
     spr_tl(r, u5, "outerkey_b", 63, 411, 255);
     spr_tl(r, u5, "outerkey_p", 535, 148, 255);
     spr_tl(r, u5, "outerkey_r", 434, 533, 255);
