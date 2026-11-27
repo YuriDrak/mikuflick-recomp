@@ -1,4 +1,4 @@
-# Linux (and Android) port plan: Miku Flick/02 → native C11 / SDL2
+# Linux, Android and iOS port plan: Miku Flick/02 → native C11 / SDL2
 
 This is a clean-room **reimplementation** of the game logic in portable C, driven by the user's own extracted IPA. It is not a binary translation of the ARM code. The repository ships no SEGA/Crypton data. Every asset, and every data table read from the executable, comes from the user's `.ipa` at setup time.
 
@@ -141,6 +141,8 @@ Without `unzip`, use the built-in importer instead of `setup`:
 ```
 
 Android: see `android/README.md` (`make -C android toolchain licenses sdk apk install run`; the game data is imported in the app).
+
+iOS: see `ios/README.md` (`make -C ios sim` for Simulator, `make -C ios device` for device; requires Xcode 27.2+ on macOS with iOS 26.0 SDK).
 
 ## 9. Android port and FFmpeg removal (2026-11-24)
 

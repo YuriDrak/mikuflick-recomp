@@ -1,6 +1,6 @@
-# Miku Flick/02 — native Linux and Android port
+# Miku Flick/02 — native Linux, Android and iOS port
 
-A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for Linux and Android (see [`android/README.md`](android/README.md)). The rhythm-game rules — note timing, judgement windows, scoring, combo bonus, tension gauge and ranks — are reproduced from the reverse-engineered original, as documented in [`docs/`](docs/).
+A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for Linux, Android (see [`android/README.md`](android/README.md)) and iOS (see [`ios/README.md`](ios/README.md)). The rhythm-game rules — note timing, judgement windows, scoring, combo bonus, tension gauge and ranks — are reproduced from the reverse-engineered original, as documented in [`docs/`](docs/).
 
 > **This repository ships no game data.** It contains no SEGA/Crypton assets, music, video, artwork or charts. You need your own legally obtained, decrypted copy of `com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa` [ios3-6-ipas](https://archive.org/download/ios3-6-ipas) (v1.1.5, armv7). The port extracts the IPA locally and reads its tables, movies, audio and textures at runtime.
 
@@ -15,6 +15,7 @@ A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for
 - Mouse and multi-touch flick input, keyboard equivalents for every screen, input-timing calibration, fullscreen and volume controls.
 - Any screen shape: the original 2:3 layout stays centred (keys exactly where they were on iOS), and the bars on tall phones or wide monitors show a blurred copy of the video or menu.
 - Android app (APK) built from the same C sources: touch, Back button, pause when the app is left. See [`android/README.md`](android/README.md).
+- iOS app built from the same C sources: native Files picker for IPA import, scene-based lifecycle, automatic signing. See [`ios/README.md`](ios/README.md).
 - Headless modes for automated verification (`--autoplay`, `--autoplay-input`, screenshot and script modes).
 
 All 11 bundled songs and all five difficulties (Easy, Normal, Hard, Extreme, Break the Limit) are unlocked.
@@ -110,12 +111,31 @@ make -C android install run      # install and start, then import your IPA in th
 
 Details, controls and debugging: [`android/README.md`](android/README.md).
 
+## iOS
+
+The same sources build into an iOS app (arm64, iOS 26.0+). The `ios/Makefile` wraps CMake and fetches SDL dependencies. On first launch, the app presents a native Files picker to import your own IPA.
+
+```sh
+make -C ios sim                  # Simulator build (arm64)
+make -C ios device               # Device build (unsigned, arm64)
+```
+
+For a signed installation on a physical device:
+
+```sh
+make -C ios device SIGNING=YES TEAM=ABCDE12345 BUNDLE_ID=com.example.yourname.mikuflick
+open ios/build/iphoneos/MikuFlick.xcodeproj
+```
+
+Then select your device in Xcode and run. Details: [`ios/README.md`](ios/README.md).
+
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `port/` | The game: C sources shared by Linux and Android, Linux `Makefile`, bundled M+ font and the `pl_mpeg` (MIT) video decoder, detailed README. |
+| `port/` | The game: C sources shared by Linux, Android and iOS, Linux `Makefile`, bundled M+ font and the `pl_mpeg` (MIT) video decoder, detailed README. |
 | `android/` | Android build: Gradle/CMake project, `Makefile` that fetches the toolchain into `android/third_party/` (ignored), README. |
+| `ios/` | iOS build: CMake/Makefile project, Objective-C bridge, native Files picker for IPA import, README. |
 | `docs/` | Reverse-engineering notes, the port design plan and the original IPA archive inventory. |
 | `tools/` | Self-contained C utilities and scripts used during analysis (`machoinfo`, `usmdump`, `bplist2json`, `mfextract`, Ghidra helpers, IPA extractor). `mfextract` shares the table reader in `port/src/mfx.c`. |
 | `CLAUDE.md` | Agent operational rules and the current project status. |
@@ -127,6 +147,7 @@ Details, controls and debugging: [`android/README.md`](android/README.md).
 
 - [`port/README.md`](port/README.md) — detailed build, controls, features and testing aids.
 - [`android/README.md`](android/README.md) — Android toolchain, APK build, installing and adding your game data, debugging.
+- [`ios/README.md`](ios/README.md) — iOS build, CMake/Makefile, native IPA import, signing, status.
 - [`docs/linux_port_plan.md`](docs/linux_port_plan.md) — platform mapping, module layout, timing/sync design, deliberate deviations, verification, and the Android/decoder notes (§9).
 - [`docs/re_notes.md`](docs/re_notes.md) — reverse-engineering notes: USM format, chart format, atlases, judgement/scoring formulas, scene state machine and rendering.
 - [`docs/archive_layout.md`](docs/archive_layout.md) — inventory of the original IPA and its binary.

@@ -1,6 +1,6 @@
-# Miku Flick/02: the game sources (Linux build)
+# Miku Flick/02: the game sources (Linux, Android, iOS build)
 
-A native C11/SDL2 reimplementation of SEGA's *Miku Flick/02* (iOS, v1.1.5). This directory builds the Linux version; the same `src/` files are also compiled for Android (see `../android/README.md`). The gameplay rules (note timing, judgement windows, scoring, combo bonus, tension gauge, ranks) are ported from the reverse-engineered original. See `../docs/re_notes.md`.
+A native C11/SDL2 reimplementation of SEGA's *Miku Flick/02* (iOS, v1.1.5). This directory builds the Linux version; the same `src/` files are also compiled for Android (see `../android/README.md`) and iOS (see `../ios/README.md`). The gameplay rules (note timing, judgement windows, scoring, combo bonus, tension gauge, ranks) are ported from the reverse-engineered original. See `../docs/re_notes.md`.
 
 **No game data is included.** You need your own copy of `com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa` (v1.1.5, armv7, decrypted). At setup time the port extracts the IPA and reads its tables. At runtime it loads movies, audio and textures straight from the extracted app.
 
@@ -56,7 +56,7 @@ Menus (on a touchscreen a tap works wherever a click does; the first finger driv
 | RESULTS | RECORDS; LEADERBOARD / ACHIEVEMENTS only show that Game Center is not available; Back | `Up`/`Down` + `Enter`, `Esc` back |
 | RECORDS | swipe sideways or use the side arrows for the song, the arrows by the title for the difficulty, the FLICK RESULT button for the per-key page | `Left`/`Right` song, `Up`/`Down` difficulty, `Space`/`Tab` page, `Enter` next board on the flick page, `Esc` back |
 
-The Android build is described in `../android/README.md`.
+The Android build is described in `../android/README.md`. The iOS build is described in `../ios/README.md`.
 
 ## Display
 

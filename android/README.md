@@ -1,6 +1,7 @@
 # Android build
 
-The Android app runs the same C11 + SDL2 code as the Linux port (`../port/src`),
+The Android app runs the same C11 + SDL2 code as the Linux port (`../port/src`)
+and the iOS port (`../ios/`),
 built with the NDK through CMake and wrapped in SDL's Java activity. Like the
 Linux build, it ships **no SEGA/Crypton data**: you import the game data from
 your own decrypted IPA on the device (or copy an existing extraction from a PC).
@@ -105,6 +106,7 @@ file providers. Not measured yet: audio latency on different phones.
 | `app/jni/CMakeLists.txt` | builds SDL2, SDL2_image (stb PNG), SDL2_ttf (bundled FreeType) and `libmain.so` |
 | `app/src/main/java/.../MikuFlickActivity.java` | `SDLActivity` subclass: library list, intent arguments, system file picker for the IPA (fd passed to `port/src/ipa.c`) |
 | `app/src/main/AndroidManifest.xml` | portrait, fullscreen, no permissions |
+| `../ios/` | iOS port: CMake/Makefile, native Files picker, scene-based lifecycle |
 
 ## Not done yet
 

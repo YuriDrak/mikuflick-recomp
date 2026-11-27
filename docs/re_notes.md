@@ -1,4 +1,4 @@
-# Reverse-engineering notes: Miku Flick/02 (v1.1.5, armv7)
+# Reverse-engineering notes: Miku Flick/02 (v1.1.5, armv7) — for Linux, Android, iOS
 
 Tags: **[V]** verified (evidence given), **[H]** hypothesis, **[D]** derived from decompilation (see `work/decomp/`).
 Addresses are VM addresses in `MikuFlick2` (image base 0x4000 = file offset 0). A trailing `+1` on a pointer means Thumb.
