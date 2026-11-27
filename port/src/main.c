@@ -42,6 +42,7 @@ typedef struct {
    the game (2), PV view (4), result (8), ending (9/14) and boot (0) fade through black. Port scenes:
    SCENE_SELECT = 3, SCENE_PV = PV select (7), SCENE_OPTION = 6; the PV view is the game in pv_mode. */
 static bool shows_loading(int from, int to) {
+    if (IS_RECORDS_SCENE(to) || (to == SCENE_TITLE && from == SCENE_SCORE)) return true;   /* RECORDS: 5, 10; 1 from 5 */
     if (to == SCENE_SELECT || to == SCENE_PV || to == SCENE_OPTION) return true;
     if (to == SCENE_TITLE) return from == SCENE_SELECT || from == SCENE_PV || from == SCENE_OPTION;
     return false;
@@ -527,6 +528,8 @@ int main(int argc, char **argv) {
             if (!strcmp(v, "ending")) start_scene = SCENE_ENDING;
             else if (!strcmp(v, "movie")) start_scene = SCENE_PREENDING;
             else if (!strcmp(v, "credits")) { start_scene = SCENE_OPTION; start_credits = true; }
+            if (!strcmp(v, "scores")) start_scene = SCENE_SCORE;   /* RECORDS: RESULTS menu / RECORDS screen */
+            if (!strcmp(v, "records")) start_scene = SCENE_RECORD;
             i++;
         }
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) { usage(); return 0; }
@@ -621,6 +624,7 @@ int main(int argc, char **argv) {
     }
     UiState *ui = ui_create(ren, &as, &gd, &save, &opt);
     Ending *ending = ending_create(ren, &as, &gd, &opt);
+    Records *records = records_create(ren, &as, &gd, &opt, &save);   /* RECORDS */
     Game *game = NULL;
 
     int scene = SCENE_BOOT, song = 0, diff = 1;
@@ -636,6 +640,7 @@ int main(int argc, char **argv) {
         if (start_credits) ui_enter(ui, SCENE_OPTION, NULL);   /* as if back from the ending: CREDITS */
         else ending_enter(ending, scene, SCENE_TITLE);
     } else { scene = start_scene; ui_enter(ui, scene, NULL); if (scene == SCENE_BOOT) scene = SCENE_TITLE; }
+    if (IS_RECORDS_SCENE(scene)) records_enter(records, scene, SCENE_TITLE);   /* RECORDS: --start-scene scores|records */
     Uint32 scene_ms = SDL_GetTicks();
     int last_scene = scene;
     int exit_code = 0;
@@ -723,6 +728,10 @@ int main(int argc, char **argv) {
             if (scene == SCENE_GAME) {
                 game_event(game, &e);
                 if (has_m) game_event(game, &m);
+            } else if (IS_RECORDS_SCENE(scene)) {   /* RECORDS */
+                int n = records_event(records, &e);
+                if (n >= 0) next = n;
+                if (has_m && next < 0 && (n = records_event(records, &m)) >= 0) next = n;
             } else if (!IS_ENDING_SCENE(scene)) {   /* WindowEnding / WindowPreEnding TouchButton:: are empty */
                 int n = ui_event(ui, &e, &song, &diff);
                 if (n >= 0) next = n;
@@ -740,11 +749,13 @@ int main(int argc, char **argv) {
                 }
                 if (game) { game_destroy(game); game = NULL; }
                 if (IS_ENDING_SCENE(scene)) ending_leave(ending);
+                if (IS_RECORDS_SCENE(scene)) records_leave(records, tr.target);   /* RECORDS */
                 if (tr.target == SCENE_GAME) scene = SCENE_GAME;   /* created at the top of the loop */
                 else {
                     opt.pv_mode = false;   /* leaving the PV view (or not in it) */
                     ui_enter(ui, tr.target, tr.has_res ? &tr.res : NULL);
                     if (IS_ENDING_SCENE(tr.target)) ending_enter(ending, tr.target, scene);
+                    if (IS_RECORDS_SCENE(tr.target)) records_enter(records, tr.target, scene);   /* RECORDS */
                     scene = tr.target;
                 }
                 tr.switched = true;
@@ -752,6 +763,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (tr.switched && cnt >= FADE_FRAMES) tr.on = false;
+            else if (tr.switched && IS_RECORDS_SCENE(scene)) records_update(records);   /* RECORDS */
             else if (tr.switched && IS_ENDING_SCENE(scene)) ending_update(ending, true, &song, &diff);
             else if (tr.switched && scene != SCENE_GAME) ui_update(ui, &song, &diff);   /* see Transition */
         } else if (scene == SCENE_GAME && next != SCENE_QUIT) {
@@ -782,8 +794,12 @@ int main(int argc, char **argv) {
                     if (ns >= 0) { game_destroy(game); game = NULL; song = ns; continue; }   /* CriManager ReLoad: in place */
                     to = SCENE_PV;
                 } else to = res.rank < 0 ? SCENE_SELECT : SCENE_RESULT;
+                if (to == SCENE_RESULT) records_store(&save, &res);   /* RECORDS: written by ui_enter(SCENE_RESULT) */
                 trans_start(&tr, scene, to, to == SCENE_RESULT ? &res : NULL);
             }
+        } else if (IS_RECORDS_SCENE(scene) && next < 0) {   /* RECORDS */
+            int n = records_update(records);
+            if (n >= 0) next = n;
         } else if (IS_ENDING_SCENE(scene) && next < 0) {
             int n = ending_update(ending, false, &song, &diff);
             if (n >= 0) next = n;
@@ -802,6 +818,7 @@ int main(int argc, char **argv) {
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
             SDL_RenderFillRect(ren, NULL);
         } else if (scene == SCENE_GAME && game) game_render(game);
+        else if (IS_RECORDS_SCENE(scene)) records_render(records);   /* RECORDS */
         else if (IS_ENDING_SCENE(scene)) ending_render(ending);
         else ui_render(ui);
         if (tr.on) render_fade(ren, &as, &tr);
@@ -836,6 +853,7 @@ int main(int argc, char **argv) {
 
     if (game) game_destroy(game);
     ending_destroy(ending);
+    records_destroy(records);   /* RECORDS */
     ui_destroy(ui);
     view_quit();
     text_quit();

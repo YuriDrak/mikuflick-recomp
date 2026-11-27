@@ -734,6 +734,7 @@ void ui_enter(UiState *u, int scene, const GameResult *res) {
     int prev_scene = u->scene;
     u->scene = scene;
     if (IS_ENDING_SCENE(scene)) { stop_bgm(u); stop_preview(u); }   /* ending.c plays BGM04 / the movie */
+    if (IS_RECORDS_SCENE(scene)) { stop_bgm(u); stop_preview(u); }  /* RECORDS: records.c plays BGM03 */
     u->enter_ms = u->last_ms = SDL_GetTicks();
     u->tick_acc = 0;
     u->ticks = 0;
@@ -1292,6 +1293,7 @@ static int ui_event_inner(UiState *u, const SDL_Event *e, int *song, int *diff) 
             break;
         }
         if (u->tstate == 10) {
+            { int n = records_crown_event(u->as, e); if (n >= 0) return n; }   /* RECORDS: TouchGotoScore */
             if (key && (k == SDLK_ESCAPE || k == SDLK_BACKSPACE)) { u->tstate = 9; play_sound(u->as, SE_BACK); break; }   /* port: keyboard only */
             if (key && (k == SDLK_UP || k == SDLK_DOWN)) u->menu_kbd = true;
             if (key && k == SDLK_UP) u->menu_focus = (u->menu_focus + 3) % 4;
@@ -1481,7 +1483,7 @@ static void render_title(UiState *u) {
             /* label: 24-px capitals from y + 24, centred (device screenshot) */
             font_draw(r, k_menu_label[i], x + 193, y + 22, 3.25f * s, col, 0);
         }
-        spr_tl(r, u1, "crownicon_off", 14, 893, 255);   /* TouchGotoScore initType @0x63440: m_Pos (14, 893) */
+        records_crown_render(r, u1);   /* RECORDS: TouchGotoScore at (14,893) (was crownicon_off at (14,878)) */
         spr_tl(r, u1, "infoicon_off", 559, 878, 255);
     }
     render_white_fade(u, u->fade);

@@ -42,6 +42,7 @@ void save_load(SaveData *s, const char *dir) {
             else if (!strcmp(key, "guide_panel")) o->guide_panel = fv != 0;
             else if (!strcmp(key, "pause_button")) o->pause_button = fv != 0;
         }
+        records_load_line(s, line);   /* RECORDS: recx / flk lines */
     }
     fclose(f);
     if (!has_timing && legacy_timing)
@@ -67,6 +68,7 @@ void save_write(const SaveData *s) {
             if (r->score || r->rank >= 0)
                 fprintf(f, "rec %d %d %d %d %d %d\n", i, d, r->score, r->rank, r->combo, r->cleared);
         }
+    records_save_lines(s, f);   /* RECORDS */
     for (int i = 0; i < MAX_SONGS; i++)
         if (s->timing[i]) fprintf(f, "timing %d %d\n", i, s->timing[i]);
     fclose(f);

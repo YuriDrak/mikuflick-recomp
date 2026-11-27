@@ -213,8 +213,18 @@ typedef struct {
 
 /* ---------------- save.c ---------------- */
 typedef struct { int score, rank, combo, cleared; } Record;
+/* RECORDS (records.c): the rest of the original's per song x difficulty MusicData record, shown on the
+   RECORDS screen. notes/flick_total are the chart's (every play), stage/combo_score/result/flick_success
+   belong to the top score (replaced with it), interlude is a max, perfect a flag; stored = line present */
+typedef struct {
+    int notes, stage, combo_score, interlude, perfect, stored;
+    int result[6];           /* TopNoteResult, index = grade as GameResult.counts (5 COOL .. 1 WORST) */
+    int flick_total[NUM_KEYS][NUM_FLICK_DIRS];
+    int flick_success[NUM_KEYS][NUM_FLICK_DIRS];
+} RecordEx;
 typedef struct {
     Record rec[MAX_SONGS][NUM_DIFF];
+    RecordEx recx[MAX_SONGS][NUM_DIFF];   /* RECORDS */
     int timing[MAX_SONGS];   /* per-song INPUT TIMING (MusicData GetInputTiming), set in the pause menu */
     bool has_opt;            /* options stored in the save file */
     Options opt;             /* only the persistent fields are used */
@@ -317,5 +327,23 @@ void ending_leave(Ending *e);
 int ending_update(Ending *e, bool frozen, int *song, int *diff);
 void ending_render(Ending *e);
 SDL_Texture *ending_backdrop(const Ending *e);       /* the movie, for the screen bars */
+
+/* ---------------- records.c (RECORDS): title crown -> RESULTS (SceneScore) -> RECORDS (SceneRecord) */
+#include <stdio.h>
+enum { SCENE_SCORE = 5, SCENE_RECORD = 10 };
+#define IS_RECORDS_SCENE(s) ((s) == SCENE_SCORE || (s) == SCENE_RECORD)
+typedef struct Records Records;
+Records *records_create(SDL_Renderer *ren, Assets *as, const GameData *gd, const Options *opt, const SaveData *save);
+void records_destroy(Records *r);
+void records_enter(Records *r, int scene, int prev);   /* SCENE_SCORE / SCENE_RECORD; prev = scene left */
+void records_leave(Records *r, int next);
+int records_event(Records *r, const SDL_Event *e);     /* next scene or -1 */
+int records_update(Records *r);                        /* 30 Hz exec; -1 */
+void records_render(Records *r);
+int records_crown_event(Assets *as, const SDL_Event *e);   /* title menu: SCENE_SCORE or -1 */
+void records_crown_render(SDL_Renderer *ren, const Atlas *ui1);
+void records_store(SaveData *s, const GameResult *res);    /* before ui_enter(SCENE_RESULT) */
+bool records_load_line(SaveData *s, const char *line);     /* save.c: recx / flk lines */
+void records_save_lines(const SaveData *s, FILE *f);
 
 #endif
