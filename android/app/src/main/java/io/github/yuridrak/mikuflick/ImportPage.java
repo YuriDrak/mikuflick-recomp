@@ -23,18 +23,16 @@ final class ImportPage extends NativePage {
     static final int PHASE_PROMPT = 0, PHASE_IMPORTING = 1, PHASE_FAILED = 2;   /* android.c */
 
     private final int mode;
-    private final String filesDir;
     private int phase = -1;
 
     private ImageView statusIcon;
-    private TextView cardTitle, body, percent, file, footer, action, later;
+    private TextView cardTitle, body, percent, file, action, later;
     private View pill, progressBox;
     private ProgressBar bar;
 
-    ImportPage(MikuFlickActivity act, int mode, String filesDir) {
+    ImportPage(MikuFlickActivity act, int mode) {
         super(act);
         this.mode = mode;
-        this.filesDir = filesDir;
     }
 
     @Override
@@ -148,11 +146,6 @@ final class ImportPage extends NativePage {
         llp.topMargin = dp(10);
         col.addView(later, llp);
 
-        footer = text(12, TERTIARY, false);
-        footer.setGravity(Gravity.CENTER);
-        footer.setText("Or copy MikuFlick2.app and gamedata.txt to:\n" + filesDir);
-        footer.setTextIsSelectable(false);
-        col.addView(footer, spaced(18));
 
         setState(PHASE_PROMPT, 0, "", "");
         return root;
@@ -194,7 +187,6 @@ final class ImportPage extends NativePage {
             setButtonIcon(action, R.drawable.ic_page_folder);
             action.setVisibility(View.VISIBLE);
             later.setVisibility(declinable ? View.VISIBLE : View.GONE);
-            footer.setVisibility(mode == MODE_DLC ? View.GONE : View.VISIBLE);
         } else if (ph == PHASE_IMPORTING) {
             statusIcon.setImageDrawable(tinted(R.drawable.ic_page_download, TEAL));
             cardTitle.setText("Importing Game Data…");
@@ -206,7 +198,6 @@ final class ImportPage extends NativePage {
             file.setText(fileName.isEmpty() ? "Verifying archive…" : fileName);
             action.setVisibility(View.GONE);
             later.setVisibility(View.GONE);
-            footer.setVisibility(View.GONE);
         } else {
             statusIcon.setImageDrawable(tinted(R.drawable.ic_page_warning, ORANGE));
             cardTitle.setText("Import Failed");
@@ -218,7 +209,6 @@ final class ImportPage extends NativePage {
             setButtonIcon(action, R.drawable.ic_page_retry);
             action.setVisibility(View.VISIBLE);
             later.setVisibility(declinable ? View.VISIBLE : View.GONE);
-            footer.setVisibility(View.GONE);
         }
     }
 

@@ -51,11 +51,10 @@ public class MikuFlickActivity extends SDLActivity {
 
     /** Called from native code (SDL thread): shows a page over the game. */
     public void showPage(int kind, int mode, byte[] filesDir) {
-        String dir = new String(filesDir, StandardCharsets.UTF_8);
         pageActions.clear();
         runOnUiThread(() -> {
             if (page != null) page.detach(false);
-            page = kind == PAGE_IMPORT ? new ImportPage(this, mode, dir) : null;
+            page = kind == PAGE_IMPORT ? new ImportPage(this, mode) : null;
             if (page != null) page.attach();
         });
     }
