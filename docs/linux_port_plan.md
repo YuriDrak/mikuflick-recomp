@@ -94,6 +94,7 @@ Touches in the original are UIKit points (320×480); the port converts its 640×
 * **Pause button cut-off:** the original refuses the pause once the movie's last frame is reached; the port refuses it in the last 2 s.
 * **RECORDS:** lists every song in music-select order with all 5 difficulties; the touch slop before arrows hide is 4 px; the background cubes are not drawn; stars are skipped on a Break the Limit page (the original tests the difficulty last played).
 * Keyboard equivalents exist for every touch gesture (see `port/README.md`); the original is touch only.
+* **Movie deblocking:** the movies are 320×480 MPEG-1 at a low bit rate, drawn 2× or more, so the original shows 8×8 block tiles in smooth areas. The port runs a deblocking post-filter on each shown frame (`media.c`: at each block edge with smooth sides the jump is spread as a linear ramp over 8 pixels, thresholds from the picture's quantizer, which a small pl_mpeg patch reports). `MF_NO_DEBLOCK=1` shows the frames as decoded.
 * Lyric-line telops (op 3) are only shown in PV mode in the original, so the core game does not need a text font.
 * Menu layouts and timings are taken from the binary (re_notes §6); the remaining visual differences are listed in re_notes §6.9.
 
@@ -119,6 +120,7 @@ Headless checks (`SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy`, real-time au
 | `mfextract` with the ending table | 76 `ending` lines, every other line unchanged | 76 lines; the rest identical to the previous `gamedata.txt`; with an old `gamedata.txt` the ENDING button is hidden and a log line asks to rerun setup |
 | OPTIONS → CREDITS → ENDING round trip, headless | roll ≈ 100.7 s, hold, BGM fade, back to CREDITS through the loading screen | ran end to end in one ~117 s run; `--start-scene movie` starts 激唱 Extreme ≈ 9.5 s in |
 | PV view, scripted mouse drags | tap does nothing, > 320 px drag changes PV, pause button, RESUME, RETRY fade-in, MUSIC SELECT | as expected (screenshots); a natural movie end with LOOP/SHUFFLE was not run headless (same code path as a swipe reload) |
+| Movie deblocking, カンタレラ 170 s / 183 s frames with and without `MF_NO_DEBLOCK` | tiles in skin and floor gone, edges and texture kept | as expected (block steps of the face close-up removed; stair-stepped hair edges remain, that detail is not in the stream) |
 
 Caveat: if three instances share the CPU under the software renderer, frame times exceed the 33 ms tick and synthetic presses land late. The game samples input once per frame (the original runs at 30 fps), so play quality depends on the frame rate. With a GPU renderer and vsync this is not an issue.
 

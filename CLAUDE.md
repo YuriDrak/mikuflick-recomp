@@ -38,6 +38,7 @@ The repository ships **no SEGA/Crypton game data**. A user-supplied, decrypted I
 - **Testing aids**: `--autoplay`, `--autoplay-input`, `--exit-after-song`, `--shot-dir/--shot-times`, `--shot-ui-times`, `--start-scene`, `--script`, headless via dummy SDL drivers.
 - **RE tooling** (`tools/`): own C tools `machoinfo`, `usmdump`, `bplist2json`, `mfextract`, plus Ghidra scripts and IPA extractor. Ghidra is **not vendored**; `tools/ghidra_decompile.sh` uses `GHIDRA_DIR` or `tools/third_party/`.
 - **Docs**: `docs/archive_layout.md` (IPA inventory), `docs/re_notes.md` (formats, formulas, scene/render analysis), `docs/linux_port_plan.md` (design, timing, deviations, verification).
+- **Movie deblocking** (`media.c`, pl_mpeg `plm_video_get_quantizer` patch): the 320×480 low-bit-rate movies get a post-filter that ramps out 8×8 block steps in smooth areas; `MF_NO_DEBLOCK=1` turns it off.
 
 ## Verified (see `docs/linux_port_plan.md` §7)
 

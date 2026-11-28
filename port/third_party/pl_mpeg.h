@@ -3,7 +3,8 @@ PL_MPEG - MPEG1 Video decoder, MP2 Audio decoder, MPEG-PS demuxer
 SPDX-License-Identifier: MIT
 
 MIKUFLICK PATCH: this copy is patched for 9-11 bit intra DC precision (MPEG-2 style,
-used by CRI Sofdec/TMPGEnc streams); search for "MIKUFLICK PATCH". Upstream:
+used by CRI Sofdec/TMPGEnc streams) and reports the average quantizer of a picture
+(plm_video_get_quantizer, for the port's deblocking filter); search for "MIKUFLICK PATCH". Upstream:
 https://github.com/phoboslab/pl_mpeg
 
 Dominic Szablewski - https://phoboslab.org
@@ -715,6 +716,12 @@ void plm_video_set_no_delay(plm_video_t *self, int no_delay);
 // streams signal 11 bits in user data ("IDCPREC") / the USM header (mpeg_dcprec).
 
 void plm_video_set_intra_dc_precision(plm_video_t *self, int precision);
+
+
+// MIKUFLICK PATCH: average quantizer_scale (1..31) of the macroblocks of the last decoded picture,
+// for a deblocking post-filter; 0 before the first picture.
+
+int plm_video_get_quantizer(plm_video_t *self);
 
 
 // Get the current internal time in seconds.
@@ -2750,6 +2757,7 @@ struct plm_video_t {
 
 	int dc_predictor[3];
 	int intra_dc_precision; // MIKUFLICK PATCH: 0..3 = 8..11-bit intra DC (TMPGEnc "IDCPREC")
+	int qp_sum, qp_n, picture_qp; // MIKUFLICK PATCH: plm_video_get_quantizer
 
 	plm_buffer_t *buffer;
 	int destroy_buffer_when_done;
@@ -2847,6 +2855,10 @@ void plm_video_set_intra_dc_precision(plm_video_t *self, int precision) {
 	self->intra_dc_precision = precision < 0 ? 0 : precision > 3 ? 3 : precision;
 }
 
+int plm_video_get_quantizer(plm_video_t *self) { // MIKUFLICK PATCH
+	return self->picture_qp;
+}
+
 void plm_video_set_no_delay(plm_video_t *self, int no_delay) {
 	self->assume_no_b_frames = no_delay;
 }
@@ -2916,6 +2928,8 @@ plm_frame_t *plm_video_decode(plm_video_t *self) {
 		plm_buffer_discard_read_bytes(self->buffer);
 		
 		plm_video_decode_picture(self);
+		if (self->qp_n) self->picture_qp = (self->qp_sum + self->qp_n / 2) / self->qp_n; // MIKUFLICK PATCH
+		self->qp_sum = self->qp_n = 0;
 
 		if (self->assume_no_b_frames) {
 			frame = &self->frame_backward;
@@ -3225,6 +3239,8 @@ void plm_video_decode_macroblock(plm_video_t *self) {
 	if ((self->macroblock_type & 0x10) != 0) {
 		self->quantizer_scale = plm_buffer_read(self->buffer, 5);
 	}
+	self->qp_sum += self->quantizer_scale; // MIKUFLICK PATCH: plm_video_get_quantizer
+	self->qp_n++;
 
 	if (self->macroblock_intra) {
 		// Intra-coded macroblocks reset motion vectors

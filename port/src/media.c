@@ -260,7 +260,54 @@ struct VideoStream {
     bool eof;
     SDL_Texture *tex;
     bool shown;
+    uint8_t *pp;            /* deblocked copy of the shown frame (Y, Cb, Cr); NULL: filter off */
 };
+
+/* Deblocking post-filter. The movies are 320x480 MPEG-1 at a low bit rate (quantizer up to 31), drawn 2x
+   (3x and more on phones), so the 8x8 blocks of smooth areas (skin, floors, sky) show as tiles; the
+   original shows them too. Per line across a block edge (4 pixels each side): when both sides are smooth,
+   the jump at the edge beyond the local slope is spread as a linear ramp over all 8 pixels, which removes
+   the tile without blurring the content (only the jump is changed); otherwise only a small clipped
+   correction of the two edge pixels. Thresholds grow with the picture's quantizer, so real edges stay.
+   It works on a copy, since the decoder's frames are the reference pictures for the next ones.
+   MF_NO_DEBLOCK=1 turns it off. */
+static inline uint8_t clip255(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+
+static void deblock_edge(uint8_t *q, int step, int alpha, int beta, int tc) {
+    int p[4], r[4];   /* p[0] = p0 next to the edge ... p[3]; r[] likewise on the far side */
+    for (int i = 0; i < 4; i++) p[i] = q[-(i + 1) * step], r[i] = q[i * step];
+    int slope2 = (p[0] - p[1]) + (r[1] - r[0]);   /* 2x the local gradient */
+    int jump = r[0] - p[0];
+    int s = (2 * jump - slope2) / 2;              /* the step the block edge adds */
+    if (abs(s) >= alpha || !s) return;
+    bool smooth = true;
+    for (int i = 0; i < 3 && smooth; i++)
+        smooth = abs(p[i] - p[i + 1]) < beta && abs(r[i] - r[i + 1]) < beta;
+    if (smooth) {   /* ramp: weights 7,5,3,1 /16 on each side */
+        for (int i = 0; i < 4; i++) {
+            int c = (s * (7 - 2 * i) + (s < 0 ? -8 : 8)) / 16;
+            q[-(i + 1) * step] = clip255(p[i] + c);
+            q[i * step] = clip255(r[i] - c);
+        }
+    } else if (abs(p[0] - p[1]) < beta && abs(r[1] - r[0]) < beta) {
+        int d = (jump * 4 + (p[1] - r[1]) + 4) >> 3;
+        d = d < -tc ? -tc : d > tc ? tc : d;
+        q[-step] = clip255(p[0] + d);
+        q[0] = clip255(r[0] - d);
+    }
+}
+
+static void deblock_plane(uint8_t *d, const plm_plane_t *s, int qp) {
+    int w = (int)s->width, h = (int)s->height;
+    memcpy(d, s->data, (size_t)w * (size_t)h);
+    if (qp <= 0) return;
+    int alpha = 3 * qp + 12, beta = qp / 2 + 4, tc = qp / 3 + 1;
+    if (alpha > 80) alpha = 80;
+    for (int y = 0; y < h; y++)   /* vertical edges, then horizontal ones */
+        for (int x = 8; x + 4 <= w; x += 8) deblock_edge(d + y * w + x, 1, alpha, beta, tc);
+    for (int y = 8; y + 4 <= h; y += 8)
+        for (int x = 0; x < w; x++) deblock_edge(d + y * w + x, w, alpha, beta, tc);
+}
 
 /* pl_mpeg pulls more bytes: feed the next @SFV payloads */
 static void video_feed(plm_buffer_t *b, void *user) {
@@ -297,6 +344,10 @@ VideoStream *video_open(const char *path, SDL_Renderer *ren) {
     if (v->fps <= 0) v->fps = 20.0;
     v->tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, plm_video_get_width(v->dec),
                                plm_video_get_height(v->dec));
+    if (!(getenv("MF_NO_DEBLOCK") && atoi(getenv("MF_NO_DEBLOCK")))) {
+        size_t lw = (size_t)(plm_video_get_width(v->dec) + 15) & ~(size_t)15, lh = (size_t)(plm_video_get_height(v->dec) + 15) & ~(size_t)15;
+        v->pp = malloc(lw * lh * 3 / 2);   /* NULL: shown unfiltered */
+    }
     if (!v->tex) goto fail;
     return v;
 fail:
@@ -318,8 +369,16 @@ void video_update(VideoStream *v, double t) {
     }
     if (last) {   /* the frame stays valid until the next plm_video_decode */
         SDL_Rect r = {0, 0, (int)last->width, (int)last->height};
-        SDL_UpdateYUVTexture(v->tex, &r, last->y.data, (int)last->y.width, last->cb.data, (int)last->cb.width,
-                             last->cr.data, (int)last->cr.width);
+        const uint8_t *y = last->y.data, *cb = last->cb.data, *cr = last->cr.data;
+        if (v->pp) {
+            int qp = plm_video_get_quantizer(v->dec);
+            uint8_t *py = v->pp, *pcb = py + last->y.width * last->y.height, *pcr = pcb + last->cb.width * last->cb.height;
+            deblock_plane(py, &last->y, qp);
+            deblock_plane(pcb, &last->cb, qp);
+            deblock_plane(pcr, &last->cr, qp);
+            y = py, cb = pcb, cr = pcr;
+        }
+        SDL_UpdateYUVTexture(v->tex, &r, y, (int)last->y.width, cb, (int)last->cb.width, cr, (int)last->cr.width);
         v->shown = true;
     }
 }
@@ -328,6 +387,7 @@ SDL_Texture *video_texture(VideoStream *v) { return (v && v->shown) ? v->tex : N
 
 void video_close(VideoStream *v) {
     if (!v) return;
+    free(v->pp);
     if (v->tex) SDL_DestroyTexture(v->tex);
     if (v->dec) plm_video_destroy(v->dec);
     if (v->buf) plm_buffer_destroy(v->buf);
