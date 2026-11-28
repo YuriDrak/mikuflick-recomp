@@ -35,15 +35,27 @@ final class DlcPage extends NativePage {
 
     @Override
     View build() {
-        FrameLayout root = new FrameLayout(ctx);
+        /* a top bar with Done, and the page scrolling below it (not under it) */
+        LinearLayout root = new LinearLayout(ctx);
+        root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(BACKGROUND);
+        FrameLayout bar = new FrameLayout(ctx);
+        bar.setBackgroundColor(BACKGROUND);
+        root.addView(bar, lp(MATCH, dp(52)));
+        View hairline = new View(ctx);   /* shown once the page scrolls under the bar */
+        hairline.setBackgroundColor(SEPARATOR);
+        hairline.setVisibility(View.INVISIBLE);
+        root.addView(hairline, lp(MATCH, Math.max(1, dp(0.5f))));
         ScrollView scroll = new ScrollView(ctx);
         scroll.setFillViewport(true);
-        root.addView(scroll, new FrameLayout.LayoutParams(MATCH, MATCH));
+        scroll.setOnScrollChangeListener((v, x, y, ox, oy) -> hairline.setVisibility(y > 0 ? View.VISIBLE : View.INVISIBLE));
+        LinearLayout.LayoutParams slp = lp(MATCH, 0);
+        slp.weight = 1;
+        root.addView(scroll, slp);
 
         LinearLayout col = new LinearLayout(ctx);
         col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(dp(16), dp(52), dp(16), dp(32));
+        col.setPadding(dp(16), 0, dp(16), dp(32));
         scroll.addView(col, new FrameLayout.LayoutParams(MATCH, WRAP));
 
         TextView title = text(34, LABEL, false);
@@ -52,7 +64,6 @@ final class DlcPage extends NativePage {
         title.setPadding(dp(4), 0, 0, dp(6));
         col.addView(title, lp(MATCH, WRAP));
 
-        /* Done: fixed at the top right, over the scrolling page */
         TextView done = text(17, TEAL, true);
         done.setText("Done");
         done.setGravity(Gravity.CENTER);
@@ -60,10 +71,9 @@ final class DlcPage extends NativePage {
         done.setBackground(pressable(null, dp(22)));
         done.setClickable(true);
         done.setOnClickListener(v -> act.pageAction("later"));
-        FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(WRAP, dp(44), Gravity.TOP | Gravity.END);
-        dlp.topMargin = dp(4);
+        FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(WRAP, dp(44), Gravity.CENTER_VERTICAL | Gravity.END);
         dlp.setMarginEnd(dp(8));
-        root.addView(done, dlp);
+        bar.addView(done, dlp);
 
         /* songs */
         LinearLayout songsCard = card();
