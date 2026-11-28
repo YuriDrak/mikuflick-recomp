@@ -66,6 +66,7 @@ void save_load(SaveData *s, const char *dir, const GameData *gd) {
     s->gd = gd;
     s->opt.pause_button = true;   /* saves written before DISPLAY PAUSE existed */
     s->opt.show_dlc = true;
+    snprintf(s->dlc_url, sizeof s->dlc_url, "%s", DLC_DEFAULT_URL);
     for (int i = 0; i < MAX_SONGS; i++)
         for (int d = 0; d < NUM_DIFF; d++) s->rec[i][d].rank = -1;
     if (mkdir(dir, 0755) != 0 && errno != EEXIST) log_msg("cannot create %s", dir);
@@ -90,7 +91,7 @@ void save_load(SaveData *s, const char *dir, const GameData *gd) {
         } else if (!strncmp(raw, "url ", 4)) {
             snprintf(s->dlc_url, sizeof s->dlc_url, "%s", raw + 4);
             s->dlc_url[strcspn(s->dlc_url, "\r\n")] = 0;
-            if (!net_url_ok(s->dlc_url)) s->dlc_url[0] = 0;
+            if (!net_url_ok(s->dlc_url)) snprintf(s->dlc_url, sizeof s->dlc_url, "%s", DLC_DEFAULT_URL);
         } else if (sscanf(raw, "opt %31s %f", key, &fv) == 2) {
             Options *o = &s->opt;
             s->has_opt = true;
@@ -125,7 +126,7 @@ void save_write(const SaveData *s) {
                 o->left_hand, o->keyboard, o->flower, o->guide_panel, o->pause_button);
         fprintf(f, "opt show_dlc %d\n", o->show_dlc);
     }
-    if (s->dlc_url[0]) fprintf(f, "url %s\n", s->dlc_url);
+    if (s->dlc_url[0] && strcmp(s->dlc_url, DLC_DEFAULT_URL)) fprintf(f, "url %s\n", s->dlc_url);   /* a pasted link */
     for (int i = 0; i < MAX_SONGS; i++) {
         if (!save_song_key(s, i, key, sizeof key)) continue;
         for (int d = 0; d < NUM_DIFF; d++) {

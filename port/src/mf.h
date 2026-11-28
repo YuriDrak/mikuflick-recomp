@@ -270,9 +270,13 @@ typedef struct {
     size_t keep_len;
     bool has_opt;            /* options stored in the save file */
     Options opt;             /* only the persistent fields are used */
-    char dlc_url[512];       /* DLC page: link to an IPA with the DLC packs ("" = none) */
+    char dlc_url[512];       /* DLC page: link to an IPA with the DLC packs (DLC_DEFAULT_URL unless one was pasted) */
     char path[1024];
 } SaveData;
+/* The DLC page's link until the player pastes another: the archive.org copy of the "All DLC Included"
+   IPA (offered with the maintainer's consent). Only a different link is written to the save, so a
+   new default here reaches everyone who kept the old one. */
+#define DLC_DEFAULT_URL "https://archive.org/download/miku-flick-2-1.1.5/MikuFlick2%201.1.5.ipa"
 void save_load(SaveData *s, const char *dir, const GameData *gd);
 void save_write(const SaveData *s);
 /* the song field of a save line for song index i: built-in song number or DLC movie name (NULL: none) */

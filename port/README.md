@@ -57,7 +57,7 @@ Menus (on a touchscreen a tap works wherever a click does; the first finger driv
 | CREDITS | ENDING (bottom right) plays the credits roll (about 110 s, not skippable, as in the original) and returns here | `Enter` |
 | RESULTS | RECORDS; LEADERBOARD / ACHIEVEMENTS only show that Game Center is not available; Back | `Up`/`Down` + `Enter`, `Esc` back |
 | RECORDS | swipe sideways or use the side arrows for the song, the arrows by the title for the difficulty, the FLICK RESULT button for the per-key page | `Left`/`Right` song, `Up`/`Down` difficulty, `Space`/`Tab` page, `Enter` next board on the flick page, `Esc` back |
-| DLC page (port) | SHOW DLC SONGS ON/OFF; PASTE LINK reads a download link from the clipboard, then tap a pack to download it (again to cancel); `<`/`>` page the pack list (iOS and Android show native screens instead) | `Left`/`Right` toggle or page, `Ctrl+V` paste, `Up`/`Down` + `Enter`, `Esc` back |
+| DLC page (port) | SHOW DLC SONGS ON/OFF; the pack list of the built-in archive.org link (PASTE LINK reads another from the clipboard), then tap a pack to download it (again to cancel); `<`/`>` page the pack list (iOS and Android show native screens instead) | `Left`/`Right` toggle or page, `Ctrl+V` paste, `Up`/`Down` + `Enter`, `Esc` back |
 
 The Android build is described in `../android/README.md`. The iOS build is described in `../ios/README.md`.
 

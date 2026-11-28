@@ -227,7 +227,7 @@ final class DlcPage extends NativePage {
         statusRow = status;
         dl.addView(status, lp(MATCH, WRAP));
         col.addView(dl, lp(MATCH, WRAP));
-        footer(col).setText("Paste the link of an IPA with the DLC packs to download them one by one.");
+        footer(col).setText("The link starts as the archive.org copy of the \u201cAll DLC Included\u201d IPA. Paste the link of another IPA with the DLC packs to use that one.");
 
         /* packs */
         packsHeader = header(col, "Packs");

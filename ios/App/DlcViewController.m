@@ -256,7 +256,7 @@ static BOOL Busy(const DlcDlStatus *st) {
                                           self.page->installed_packs == 1 ? @"" : @"s", self.page->installed_songs];
     }
     if (section == MFDlcSectionDownload)
-        return @"Paste the link of an IPA with the DLC packs to download them one by one.";
+        return @"The link starts as the archive.org copy of the “All DLC Included” IPA. Paste the link of another IPA with the DLC packs to use that one.";
     return @"Tap a pack to download it, or tap it again to cancel.";
 }
 
