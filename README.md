@@ -129,6 +129,10 @@ open ios/build/iphoneos/MikuFlick.xcodeproj
 
 Then select your device in Xcode and run. Details: [`ios/README.md`](ios/README.md).
 
+## Builds from CI
+
+Every push and pull request runs `.github/workflows/build.yml` on GitHub Actions, which builds the Linux port, an **unsigned iOS IPA** (`MikuFlick-unsigned.ipa`, Release, arm64) and an Android **debug APK**. Download them from the run's **Artifacts** section. Sign the IPA yourself (your own certificate or a sideloading app) before installing it. The debug APK is signed with a key made on the runner for each run, so uninstall the previous one before installing another (your imported data goes with it). Like the source, these builds contain no game data: the app asks for your own IPA on first start.
+
 ## Repository layout
 
 | Path | Contents |
@@ -137,6 +141,7 @@ Then select your device in Xcode and run. Details: [`ios/README.md`](ios/README.
 | `android/` | Android build: Gradle/CMake project, `Makefile` that fetches the toolchain into `android/third_party/` (ignored), README. |
 | `ios/` | iOS build: CMake/Makefile project, Objective-C bridge, native Files picker for IPA import, README. |
 | `docs/` | Reverse-engineering notes, the port design plan and the original IPA archive inventory. |
+| `.github/workflows/` | CI: builds the Linux port, the unsigned iOS IPA and the Android debug APK (see [Builds from CI](#builds-from-ci)). |
 | `tools/` | Self-contained C utilities and scripts used during analysis (`machoinfo`, `usmdump`, `bplist2json`, `mfextract`, Ghidra helpers, IPA extractor). `mfextract` shares the table reader in `port/src/mfx.c`. |
 | `CLAUDE.md` | Agent operational rules and the current project status. |
 | `extracted/` | *Ignored.* Your extracted game bundle, created by `make setup`. |

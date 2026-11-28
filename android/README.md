@@ -27,6 +27,8 @@ make -C android sdk         # installs NDK, CMake, platform 35, build-tools 35
 make -C android apk         # -> android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+GitHub Actions runs these same steps on every push and pull request (`.github/workflows/build.yml`, licences accepted with `yes`) and uploads the debug APK as a run artifact. It is signed with a debug key made on the runner for that run, so a CI APK only installs over another after an uninstall.
+
 The debug APK contains `arm64-v8a`, `armeabi-v7a` and `x86_64` libraries
 (16 KB page aligned), targets API 35 and needs Android 7.0 (API 24) or newer.
 

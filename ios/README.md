@@ -13,6 +13,8 @@ make -C ios device
 
 The Simulator app is in `ios/build/iphonesimulator/Debug-iphonesimulator/MikuFlick.app`. The unsigned device app is in `ios/build/iphoneos/Debug-iphoneos/MikuFlick.app`. Both generated Xcode projects, dependencies and build products live under the ignored `ios/build/` directory. The build uses the dependency checksums in [android/SHA256SUMS](../android/SHA256SUMS).
 
+GitHub Actions builds the same unsigned device app in Release on every push and pull request (`.github/workflows/build.yml`) and uploads it as `MikuFlick-unsigned.ipa` (the app in a `Payload/` folder) under the run's artifacts. Sign it yourself before installing.
+
 For a signed installation, pass your development team ID and a bundle identifier registered to your team. Then open the generated project in Xcode.
 
 ```sh

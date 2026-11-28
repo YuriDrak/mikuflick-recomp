@@ -38,6 +38,7 @@ The repository ships **no SEGA/Crypton game data**. A user-supplied, decrypted I
 - **Testing aids**: `--autoplay`, `--autoplay-input`, `--exit-after-song`, `--shot-dir/--shot-times`, `--shot-ui-times`, `--start-scene`, `--script`, headless via dummy SDL drivers.
 - **RE tooling** (`tools/`): own C tools `machoinfo`, `usmdump`, `bplist2json`, `mfextract`, plus Ghidra scripts and IPA extractor. Ghidra is **not vendored**; `tools/ghidra_decompile.sh` uses `GHIDRA_DIR` or `tools/third_party/`.
 - **Docs**: `docs/archive_layout.md` (IPA inventory), `docs/re_notes.md` (formats, formulas, scene/render analysis), `docs/linux_port_plan.md` (design, timing, deviations, verification).
+- **CI** (`.github/workflows/build.yml`, branch `android-fixes`): every push/PR builds the Linux port, an unsigned Release iOS IPA (macos-26 runner) and the Android debug APK (runner-made debug key), uploaded as run artifacts; no game data in them.
 - **Movie deblocking** (`media.c`, pl_mpeg `plm_video_get_quantizer` patch): the 320×480 low-bit-rate movies get a post-filter that ramps out 8×8 block steps in smooth areas; `MF_NO_DEBLOCK=1` turns it off.
 
 ## Verified (see `docs/linux_port_plan.md` §7)
@@ -88,4 +89,4 @@ make -C android install run       # then IMPORT IPA in the app (or: make -C andr
 
 1. Measure audio latency on phones and add a tap-to-calibrate screen; test more phones/aspect ratios.
 2. Android extras: release signing, GL context-loss texture reload; confirm the in-app import on more phones/file providers (it needs a seekable file descriptor).
-3. Optional cleanups: confirm the licence choice, add CI build, and consider a small curated, non-copyrighted subset of RE outputs if ever needed.
+3. Optional cleanups: confirm the licence choice and consider a small curated, non-copyrighted subset of RE outputs if ever needed.
