@@ -113,7 +113,21 @@ Details, controls and debugging: [`android/README.md`](android/README.md).
 
 ## iOS
 
-The same sources build into an iOS app (arm64, iOS 26.0+). The `ios/Makefile` wraps CMake and fetches SDL dependencies. On first launch, the app presents a native Files picker to import your own IPA.
+The same sources build into an iOS app (arm64, iOS 26.0+). On first launch, the app presents a native Files picker to import your own IPA.
+
+### Install with AltStore, SideStore or Feather
+
+Add this source URL in the app's Sources screen:
+
+```text
+https://github.com/YuriDrak/mikuflick-recomp/releases/latest/download/altsource.json
+```
+
+Add this exact link, not the repository's link (`https://github.com/YuriDrak/mikuflick-recomp`): the repository page is not a source, so the app cannot read it. The source always lists the IPA of the latest release, so the app is offered updates as new releases come out. It is re-signed on your device by AltStore, SideStore or Feather.
+
+### Build it yourself
+
+The `ios/Makefile` wraps CMake and fetches SDL dependencies.
 
 ```sh
 make -C ios sim                  # Simulator build (arm64)
@@ -133,7 +147,14 @@ Then select your device in Xcode and run. Details: [`ios/README.md`](ios/README.
 
 Every push and pull request runs `.github/workflows/build.yml` on GitHub Actions, which builds the Linux port, an **unsigned iOS IPA** (`MikuFlick-unsigned.ipa`, Release, arm64) and an Android **debug APK**. Download them from the run's **Artifacts** section. Sign the IPA yourself (your own certificate or a sideloading app) before installing it. The debug APK is signed with a key made on the runner for each run, so uninstall the previous one before installing another (your imported data goes with it). Like the source, these builds contain no game data: the app asks for your own IPA on first start.
 
-When a GitHub release is published, the same workflow sets the app's version from the release tag and attaches `MikuFlick.ipa` and an AltSource, `altsource.json` (made by `ios/altsource.sh`), to the release. To install and update the iOS app from AltStore, SideStore or Feather, add this source: `https://github.com/YuriDrak/mikuflick-recomp/releases/latest/download/altsource.json`. The app is re-signed on your device by that app.
+Pushing a version tag (for example `v0.4.1`) makes the same workflow publish a GitHub release. The workflow sets the iOS app's version from the tag and attaches these files to the release:
+
+- `MikuFlick-<version>-iOS.ipa`;
+- `mikuflick-<version>-android.apk`;
+- the Linux tarball;
+- the AltSource, `altsource.json` (made by `ios/altsource.sh`).
+
+For AltStore, SideStore or Feather, add the source URL given under [Install with AltStore, SideStore or Feather](#install-with-altstore-sidestore-or-feather), not the repository's link.
 
 ## Repository layout
 
