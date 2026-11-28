@@ -164,6 +164,14 @@ void mixer_voice_gain(int voice, const Pcm *p, float gain);  /* if that voice st
 typedef void (*IpaProgress)(void *ud, double frac, const char *file);
 bool ipa_import(int fd, const char *dir, IpaProgress cb, void *ud, char *err, size_t errlen);
 
+/* ---------------- android.c (Android only): native pages over the game ---------------- */
+enum { ANDROID_PAGE_IMPORT = 1 };
+enum { ANDROID_IMPORT_PROMPT, ANDROID_IMPORT_RUNNING, ANDROID_IMPORT_FAILED };   /* importState phases */
+bool android_page_show(int kind, int mode, const char *files_dir);
+void android_page_hide(void);
+bool android_page_action(char *buf, size_t cap);   /* the page's next action, false if none */
+void android_import_state(int phase, double frac, const char *file, const char *err);
+
 /* ---------------- view.c ---------------- */
 /* Scenes draw into a 640x960 target between view_begin and view_present, which shows
    it centred and fills the bars of non-2:3 screens with a blurred backdrop (NULL = scene). */

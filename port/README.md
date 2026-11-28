@@ -14,7 +14,7 @@ make -C port setup IPA="/path/to/com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa"
 ```
 `setup` unpacks the IPA into `extracted/ipa/` (with an archive path-safety check) and writes `port/data/gamedata.txt`, which holds the song list, kana→key tables, judgement/score tables and the sound list read out of *your* `MikuFlick2` binary. It refuses any other build of the binary.
 
-Without `unzip`, the game can import the IPA itself: `./port/mikuflick --import-ipa your.ipa --import-to DIR` (the same code as the Android app's IMPORT IPA button, `src/ipa.c`) writes only the files the game loads to `DIR/MikuFlick2.app` plus `DIR/gamedata.txt`, with CRC checks; run with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
+Without `unzip`, the game can import the IPA itself: `./port/mikuflick --import-ipa your.ipa --import-to DIR` (the same code as the Android app's Import IPA button, `src/ipa.c`) writes only the files the game loads to `DIR/MikuFlick2.app` plus `DIR/gamedata.txt`, with CRC checks; run with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
 
 **Updating an existing install:** rerun `make -C port setup` (or re-import the IPA) once. `gamedata.txt` now also carries the ending credits read from the binary; with an older file the game still runs but hides the ENDING button on OPTIONS → CREDITS (and logs a hint). An older in-app import also lacks the `Localizable.strings` files that the help pages and option subtitles are read from.
 

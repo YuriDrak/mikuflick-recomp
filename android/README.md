@@ -37,7 +37,7 @@ it). On first start the app shows **Game data needed**:
 
 1. Copy your own decrypted `com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa`
    (v1.1.5) to the phone, e.g. into Downloads.
-2. Tap **IMPORT IPA** and pick it in the system file picker.
+2. Tap **Import IPA** and pick it in the system file picker.
 3. The app checks the game version first (only v1.1.5 armv7 is accepted), then
    extracts the files it uses (about 980 MB; it checks that there is enough
    free space) and builds `gamedata.txt`. It takes a minute or two.
@@ -104,7 +104,9 @@ file providers. Not measured yet: audio latency on different phones.
 | `SHA256SUMS` | checksums of the downloaded SDL source releases, command-line tools and Gradle |
 | `app/build.gradle` | AGP 8.7 app module: SDK levels, ABIs, CMake, SDL Java sources, font assets |
 | `app/jni/CMakeLists.txt` | builds SDL2, SDL2_image (stb PNG), SDL2_ttf (bundled FreeType) and `libmain.so` |
-| `app/src/main/java/.../MikuFlickActivity.java` | `SDLActivity` subclass: library list, intent arguments, system file picker for the IPA (fd passed to `port/src/ipa.c`) |
+| `app/src/main/java/.../MikuFlickActivity.java` | `SDLActivity` subclass: library list, intent arguments, native pages over the game (`port/src/android.c`), system file picker for the IPA (fd passed to `port/src/ipa.c`) |
+| `app/src/main/java/.../NativePage.java`, `ImportPage.java` | native screens of plain framework views (device theme, Android 7+): the IPA import screen, the counterpart of `ios/App/ImportViewController.m` |
+| `app/src/main/res/drawable/` | Material icons (Apache 2.0) for those screens |
 | `app/src/main/AndroidManifest.xml` | portrait, fullscreen, no permissions |
 | `../ios/` | iOS port: CMake/Makefile, native Files picker, scene-based lifecycle |
 

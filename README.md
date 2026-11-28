@@ -29,7 +29,7 @@ sudo apt install build-essential pkg-config \
   libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
 ```
 
-`unzip` is used by the one-time `setup` step; the built-in importer (`--import-ipa`, or **IMPORT IPA** in the Android app) does not need it. The Android build has its own requirements (JDK 17+, about 4 GB of disk for the SDK/NDK it downloads into the project); see [`android/README.md`](android/README.md).
+`unzip` is used by the one-time `setup` step; the built-in importer (`--import-ipa`, or **Import IPA** in the Android app) does not need it. The Android build has its own requirements (JDK 17+, about 4 GB of disk for the SDK/NDK it downloads into the project); see [`android/README.md`](android/README.md).
 
 ## Build and set up
 
@@ -100,7 +100,7 @@ See [`port/README.md`](port/README.md) for the full control and UI description.
 
 ## Android
 
-The same sources build into an Android app (arm64-v8a, armeabi-v7a, x86_64; Android 7.0+). The `android/Makefile` downloads the SDK, NDK, Gradle and SDL sources into the project (gitignored). On the phone, the app imports your own IPA itself: copy the `.ipa` to the phone, tap **IMPORT IPA** on the first start and pick it. No PC is needed for that step.
+The same sources build into an Android app (arm64-v8a, armeabi-v7a, x86_64; Android 7.0+). The `android/Makefile` downloads the SDK, NDK, Gradle and SDL sources into the project (gitignored). On the phone, the app imports your own IPA itself: copy the `.ipa` to the phone, tap **Import IPA** on the first start and pick it. No PC is needed for that step.
 
 ```sh
 make -C android toolchain        # downloads into android/third_party/
