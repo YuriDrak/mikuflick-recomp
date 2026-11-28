@@ -10,6 +10,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.widget.Toast;
 
 /**
  * The DLC page (title SHOP slot): show/hide DLC songs and the import of an IPA with DLC. Mirrors
@@ -69,14 +70,20 @@ final class DlcPage extends NativePage {
         LinearLayout showRow = row(R.drawable.ic_page_music);
         showLabel = rowTitle(showRow, "Show DLC Songs");
         showSwitch = new Switch(ctx);
-        int[][] st = {{android.R.attr.state_checked}, {}};
-        showSwitch.setThumbTintList(new ColorStateList(st, new int[] {LABEL, 0xFFDDDDDD}));
-        showSwitch.setTrackTintList(new ColorStateList(st, new int[] {TEAL, 0x52787880}));
+        /* disabled (no DLC songs yet) must look it: grey before checked */
+        int[][] st = {{-android.R.attr.state_enabled}, {android.R.attr.state_checked}, {}};
+        showSwitch.setThumbTintList(new ColorStateList(st, new int[] {0xFF636366, LABEL, 0xFFDDDDDD}));
+        showSwitch.setTrackTintList(new ColorStateList(st, new int[] {0x29787880, TEAL, 0x52787880}));
+        showSwitch.setClickable(false);   /* the row takes the taps, also while the switch is disabled */
+        showSwitch.setFocusable(false);
         showSwitch.setOnCheckedChangeListener((b, on) -> {
             if (!updatingSwitch) act.pageAction(on ? "show 1" : "show 0");
         });
         showRow.addView(showSwitch, lp(WRAP, WRAP));
-        showRow.setOnClickListener(v -> { if (showSwitch.isEnabled()) showSwitch.toggle(); });
+        showRow.setOnClickListener(v -> {
+            if (showSwitch.isEnabled()) showSwitch.toggle();
+            else Toast.makeText(ctx, "No DLC songs installed yet: they come from an IPA with the DLC packs.", Toast.LENGTH_SHORT).show();
+        });
         songsCard.addView(showRow, lp(MATCH, WRAP));
         col.addView(songsCard, lp(MATCH, WRAP));
         songsFooter = footer(col);

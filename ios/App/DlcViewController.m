@@ -102,6 +102,14 @@ static UIColor *MikuTeal(void) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == MFDlcSectionSongs && self.page->installed_songs <= 0) {   // the switch is disabled: say why
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"No DLC Songs Yet"
+                                                                   message:@"DLC songs come from an IPA that includes the DLC packs."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:a animated:YES completion:nil];
+        return;
+    }
     if (indexPath.section == MFDlcSectionImport) {
         self.wantsImport = YES;
         self.finished = YES;
