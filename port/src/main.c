@@ -379,6 +379,9 @@ int main(int argc, char **argv) {
     SDL_Keycode script_key[64];
     Uint32 prog_start = 0;
     bool start_credits = false;   /* --start-scene credits: OPTIONS -> CREDITS page */
+#if defined(__ANDROID__) || defined(MF_IOS)
+    int start_import = -1;   /* --start-scene import|import-update: the import screen as on a first start / an old install */
+#endif
     int win_w = 480, win_h = 720;
 
 #if defined(__ANDROID__) || defined(MF_IOS)
@@ -467,6 +470,10 @@ int main(int argc, char **argv) {
             else if (!strcmp(v, "credits")) { start_scene = SCENE_OPTION; start_credits = true; }
             if (!strcmp(v, "scores")) start_scene = SCENE_SCORE;   /* RECORDS: RESULTS menu / RECORDS screen */
             if (!strcmp(v, "records")) start_scene = SCENE_RECORD;
+#if defined(__ANDROID__) || defined(MF_IOS)
+            if (!strcmp(v, "import")) start_import = 0;
+            else if (!strcmp(v, "import-update")) start_import = 1;
+#endif
             i++;
         }
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) { usage(); return 0; }
@@ -523,6 +530,7 @@ int main(int argc, char **argv) {
     while (!(data_ready(appdir) && gamedata_load(&gd, gamedata)))
         if (!import_screen(ren, mobile_files, false)) return 1;
     if (!data_current(appdir, &gd) && import_screen(ren, mobile_files, true) && !gamedata_load(&gd, gamedata)) return 1;
+    if (start_import >= 0 && import_screen(ren, mobile_files, start_import == 1) && !gamedata_load(&gd, gamedata)) return 1;   /* testing */
     if (opt.start_song >= gd.nsongs) opt.start_song = -1;
 #endif
 
