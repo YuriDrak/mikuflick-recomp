@@ -45,4 +45,9 @@ void dlcdl_quit(void);
 /* an http(s) link the downloader accepts (net.c) */
 bool net_url_ok(const char *url);
 
+/* The DLC page's link until the player enters another: the archive.org copy of the "All DLC Included"
+   IPA (offered with the maintainer's consent). Only a different link is written to the save, so a
+   new default here reaches everyone who kept the old one; the pages offer Restore Default Link. */
+#define DLC_DEFAULT_URL "https://archive.org/download/miku-flick-2-1.1.5/MikuFlick2%201.1.5.ipa"
+
 #endif

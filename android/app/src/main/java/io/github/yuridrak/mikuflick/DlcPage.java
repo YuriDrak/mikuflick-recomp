@@ -1,17 +1,19 @@
 package io.github.yuridrak.mikuflick;
 
 import android.app.AlertDialog;
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.res.ColorStateList;
 import android.graphics.Typeface;
+import android.text.InputType;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
 import android.view.Gravity;
 import android.view.View;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -26,7 +28,8 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * The DLC page (title SHOP slot): show/hide DLC songs, the download link, per-pack downloads and the
+ * The DLC page (title SHOP slot): show/hide DLC songs, the download link (an editable field, with Restore
+ * Default Link when it differs from the built-in one), per-pack downloads and the
  * import of a whole IPA with DLC. Mirrors ios/App/DlcViewController.m. The native code
  * (port/src/main.c android_dlc_page) sends its state as text (see there) and gets actions back.
  * Rows are built once and updated in place, so a running download only changes a few labels.
@@ -45,13 +48,15 @@ final class DlcPage extends NativePage {
     /* state from native code */
     private int state = IDLE, permille, busyPack = -1, installedPacks, installedSongs;
     private boolean error, showDlc, haveState;
-    private String msg = "", url = "";
+    private String msg = "", url = "", defaultUrl = "";
     private final List<Pack> packs = new ArrayList<>();
 
     /* views */
     private Switch showSwitch;
-    private TextView showLabel, songsFooter, linkValue, pasteLabel, importLabel, statusText;
-    private ImageView pasteIcon, importIcon;
+    private TextView showLabel, songsFooter, importLabel, statusText;
+    private EditText linkField;
+    private ImageView importIcon;
+    private View restoreRow, restoreSep;
     private ProgressBar statusSpinner, statusBar;
     private View statusRow, packsHeader, packsFooter;
     private LinearLayout packsCard;
@@ -162,7 +167,7 @@ final class DlcPage extends NativePage {
         showRow.addView(showSwitch, lp(WRAP, WRAP));
         showRow.setOnClickListener(v -> {
             if (showSwitch.isEnabled()) showSwitch.toggle();
-            else Toast.makeText(ctx, "No DLC songs installed yet: they come from an IPA with the DLC packs.", Toast.LENGTH_SHORT).show();
+            else Toast.makeText(ctx, "No DLC songs installed yet: download a pack below, or import an IPA with the DLC packs.", Toast.LENGTH_SHORT).show();
         });
         songsCard.addView(showRow, lp(MATCH, WRAP));
         col.addView(songsCard, lp(MATCH, WRAP));
@@ -174,24 +179,51 @@ final class DlcPage extends NativePage {
         LinearLayout linkRow = row(R.drawable.ic_page_link, TEAL);
         LinearLayout linkTexts = new LinearLayout(ctx);
         linkTexts.setOrientation(LinearLayout.VERTICAL);
-        TextView linkTitle = text(17, LABEL, false);
+        TextView linkTitle = text(13, SECONDARY, false);
         linkTitle.setText("Download Link");
         linkTexts.addView(linkTitle);
-        linkValue = text(15, SECONDARY, false);
-        linkValue.setSingleLine(true);
-        linkValue.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-        linkTexts.addView(linkValue);
+        /* the link itself is editable; Go, Done or leaving the field takes it (commitLink) */
+        linkField = new EditText(ctx);
+        linkField.setTextSize(15);
+        linkField.setTextColor(LABEL);
+        linkField.setHintTextColor(TERTIARY);
+        linkField.setHint("https://…/file.ipa");
+        linkField.setSingleLine(true);
+        linkField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        linkField.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        linkField.setBackground(null);
+        linkField.setPadding(0, dp(2), 0, dp(2));
+        linkField.setOnEditorActionListener((v, id, ev) -> {
+            linkField.clearFocus();   /* commits through the focus listener */
+            return true;
+        });
+        linkField.setOnFocusChangeListener((v, has) -> {
+            if (has) {
+                if (refuseWhileBusy()) linkField.clearFocus();
+                return;
+            }
+            hideKeyboard();
+            commitLink();
+        });
+        linkTexts.addView(linkField, lp(MATCH, WRAP));
         linkRow.addView(linkTexts, weighted());
-        linkRow.setOnClickListener(v -> linkOptions());
+        linkRow.setBackground(null);   /* the field takes the taps */
+        linkRow.setClickable(false);
         dl.addView(linkRow, lp(MATCH, WRAP));
         separator(dl);
 
-        LinearLayout pasteRow = row(R.drawable.ic_page_paste, TEAL);
-        pasteIcon = (ImageView) pasteRow.getChildAt(0);
-        pasteLabel = rowTitle(pasteRow, "Paste Link");
-        pasteRow.setOnClickListener(v -> pasteLink());
-        dl.addView(pasteRow, lp(MATCH, WRAP));
+        /* only while the link differs from the built-in one: brings that back */
+        LinearLayout restore = row(R.drawable.ic_page_retry, TEAL);
+        rowTitle(restore, "Restore Default Link").setTextColor(TEAL);
+        restore.setOnClickListener(v -> {
+            if (refuseWhileBusy() || defaultUrl.isEmpty()) return;
+            linkField.setText(defaultUrl);
+            act.pageAction("url " + defaultUrl);
+        });
+        restoreRow = restore;
+        dl.addView(restore, lp(MATCH, WRAP));
         separator(dl);
+        restoreSep = dl.getChildAt(dl.getChildCount() - 1);
 
         LinearLayout importRow = row(R.drawable.ic_page_import, TEAL);
         importIcon = (ImageView) importRow.getChildAt(0);
@@ -227,7 +259,7 @@ final class DlcPage extends NativePage {
         statusRow = status;
         dl.addView(status, lp(MATCH, WRAP));
         col.addView(dl, lp(MATCH, WRAP));
-        footer(col).setText("The link starts as the archive.org copy of the \u201cAll DLC Included\u201d IPA. Paste the link of another IPA with the DLC packs to use that one.");
+        footer(col).setText("Packs download from this link. It starts as the archive.org copy of the \u201cAll DLC Included\u201d IPA; enter the link of another IPA with the DLC packs to use that one.");
 
         /* packs */
         packsHeader = header(col, "Packs");
@@ -305,7 +337,7 @@ final class DlcPage extends NativePage {
         List<Pack> np = new ArrayList<>();
         for (String line : lines) {
             String[] f = line.split("\t", -1);
-            if (f[0].equals("S") && f.length >= 11) {
+            if (f[0].equals("S") && f.length >= 11) {   /* S state permille busy error msg show packs songs url default */
                 state = num(f[1]);
                 permille = num(f[2]);
                 busyPack = num(f[3]);
@@ -315,6 +347,7 @@ final class DlcPage extends NativePage {
                 installedPacks = num(f[7]);
                 installedSongs = num(f[8]);
                 url = f[9];
+                defaultUrl = f[10];
                 haveState = true;
             } else if (f[0].equals("P") && f.length >= 8) {
                 Pack p = new Pack();
@@ -371,11 +404,12 @@ final class DlcPage extends NativePage {
         setText(songsFooter, !have ? "No DLC songs installed yet."
                 : installedPacks + (installedPacks == 1 ? " pack, " : " packs, ") + installedSongs + " songs installed.");
 
-        setText(linkValue, url.isEmpty() ? "None yet" : url);
+        if (!linkField.hasFocus()) setText(linkField, url);   /* never under the player's typing */
+        boolean custom = !defaultUrl.isEmpty() && !url.equals(defaultUrl);
+        setVisible(restoreRow, custom);
+        setVisible(restoreSep, custom);
         int actionColor = busy() ? SECONDARY : TEAL;
-        pasteLabel.setTextColor(actionColor);
         importLabel.setTextColor(actionColor);
-        pasteIcon.setImageTintList(ColorStateList.valueOf(actionColor));
         importIcon.setImageTintList(ColorStateList.valueOf(actionColor));
 
         /* status (the row is always there, so the page never changes shape under the finger) */
@@ -395,7 +429,7 @@ final class DlcPage extends NativePage {
             }
             break;
         }
-        default: st = haveState ? "No link yet." : ""; break;
+        default: st = haveState ? "Enter a download link." : ""; break;
         }
         setText(statusText, st);
         statusText.setTextColor(color);
@@ -518,44 +552,31 @@ final class DlcPage extends NativePage {
         return true;
     }
 
-    private ClipboardManager clipboard() {
-        return (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
+    private void hideKeyboard() {
+        InputMethodManager imm = (InputMethodManager) act.getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(linkField.getWindowToken(), 0);
     }
 
-    private void pasteLink() {
-        if (refuseWhileBusy()) return;
-        String s = "";
-        ClipboardManager cm = clipboard();
-        ClipData cd = cm != null ? cm.getPrimaryClip() : null;
-        if (cd != null && cd.getItemCount() > 0) {
-            CharSequence t = cd.getItemAt(0).coerceToText(ctx);
-            if (t != null) s = t.toString().trim();
+    /** The edited link: an empty field means the built-in link; anything else must be an http(s) link. */
+    private void commitLink() {
+        String s = linkField.getText().toString().trim();
+        if (s.isEmpty()) s = defaultUrl;
+        if (s.equals(url)) {
+            linkField.setText(url);
+            return;
+        }
+        if (busy()) {   /* a download started meanwhile: keep the link it uses */
+            linkField.setText(url);
+            return;
         }
         if (!s.matches("(?i)https?://\\S+") || s.length() >= 512 || !s.matches("\\p{ASCII}+")) {
-            alert("No Link on the Clipboard",
-                  "Copy the direct http(s) download link of an IPA that includes the DLC packs, then tap Paste Link.");
+            alert("Not a Download Link",
+                  "Enter the direct http(s) download link of an IPA that includes the DLC packs. The link was not changed.");
+            linkField.setText(url);
             return;
         }
+        linkField.setText(s);
         act.pageAction("url " + s);
-    }
-
-    private void linkOptions() {
-        if (url.isEmpty()) {
-            pasteLink();
-            return;
-        }
-        String[] items = {"Reload Pack List", "Copy Link"};
-        dialog().setTitle("Download Link")
-                .setItems(items, (d, which) -> {
-                    if (which == 0) {
-                        if (!refuseWhileBusy()) act.pageAction("list");
-                    } else {
-                        ClipboardManager cm = clipboard();
-                        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("DLC link", url));
-                    }
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
     }
 
     private void packTapped(int index, View v) {

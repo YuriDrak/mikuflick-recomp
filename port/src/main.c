@@ -490,6 +490,7 @@ static size_t dlc_page_state(const SongCtx *c, const DlcDlStatus *st, char *buf,
     sb_int(&b, packs);
     sb_int(&b, c->gd->nsongs - c->gd->nbase);
     sb_text(&b, c->save->dlc_url);
+    sb_text(&b, DLC_DEFAULT_URL);   /* DlcPage: Restore Default Link */
     sb_raw(&b, "\n");
     for (int i = 0; i < st->npacks; i++) {
         const DlcPackInfo *p = &st->packs[i];

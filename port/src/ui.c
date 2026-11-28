@@ -178,7 +178,10 @@ struct UiState {
     unsigned credits_t;
     /* DLC page */
     int dlc_page;                /* pack list page */
-    char dlc_note[160];          /* page-local message (clipboard) */
+    char dlc_note[160];          /* page-local message (link field, busy) */
+    bool dlc_editing;            /* the link field has the keyboard */
+    bool dlc_text_was_on;        /* SDL text input was on before the field took it */
+    char dlc_edit[512];          /* the link being edited */
     /* PV viewer */
     int pv_focus;
     bool pv_lyrics, pv_karaoke, pv_loop, pv_shuffle;
@@ -795,6 +798,7 @@ void ui_enter(UiState *u, int scene, const GameResult *res) {
         u->scene = SCENE_OPTION;
         opt_open(u, 7 /* OPT_DLC */);
         u->dlc_note[0] = 0;
+        u->dlc_editing = false;
         DlcDlStatus st;
         dlcdl_status(&st);
         if (st.state == DLD_IDLE && u->save->dlc_url[0]) dlcdl_list(u->save->dlc_url);   /* pack list of the saved link */
@@ -937,7 +941,7 @@ static const char *k_opt_sub[8] = {"Please select a category to change.", "MUSIC
                                    "Keyboard Settings", "", "", "Configure Display Settings", "Downloadable Songs"};
 /* port-only DLC page (title SHOP slot) on Linux; iOS and Android show a native screen instead
    (ios/App/DlcViewController.m, android/.../DlcPage.java): SHOW DLC SONGS ON / OFF and the download
-   link (PASTE LINK) with the pack list of the IPA behind it (dlcdl.c) */
+   link (an editable field, RESTORE DEFAULT LINK) with the pack list of the IPA behind it (dlcdl.c) */
 static bool dlc_installed(const UiState *u) { return u->gd->nsongs > u->gd->nbase; }
 /* main list order as on the iOS screen (help_02 panel 2) -> mode */
 static const int k_opt_list[6] = {OPT_DISPLAY, OPT_AUDIO, OPT_HAND, OPT_KEYBOARD, OPT_HELP, OPT_CREDITS};
@@ -1065,7 +1069,7 @@ static void opt_open(UiState *u, int mode) {
 #define DLC_TOGGLE_W 110.0f
 #define DLC_TOGGLE_H 56.0f
 #define DLC_STATUS_Y 446.0f
-static const SDL_FRect k_dlc_paste = {170, 358, 300, 62};
+static const SDL_FRect k_dlc_restore = {120, 376, 400, 56};   /* RESTORE DEFAULT LINK, while the link differs */
 
 static bool in_frect(const SDL_FRect *r, float x, float y) { return x >= r->x && x < r->x + r->w && y >= r->y && y < r->y + r->h; }
 
@@ -1079,35 +1083,161 @@ static int dlc_pages(int npacks) { return npacks > 0 ? (npacks + DLC_ROWS - 1) /
 
 static bool dlc_busy(const DlcDlStatus *st) { return st->state == DLD_LISTING || st->state == DLD_INSTALLING; }
 
-/* PASTE LINK: the clipboard's http(s) link becomes the saved download link and its pack list is read */
-static void dlc_paste(UiState *u) {
+static bool dlc_custom(const UiState *u) { return strcmp(u->save->dlc_url, DLC_DEFAULT_URL) != 0; }
+
+/* rows above the pack list: the toggle, the link field and, while the link differs from the built-in
+   one, RESTORE DEFAULT LINK */
+static int dlc_fixed(const UiState *u) { return 2 + dlc_custom(u); }
+
+static bool dlc_refuse_busy(UiState *u) {
     DlcDlStatus st;
     dlcdl_status(&st);
-    if (dlc_busy(&st)) {
-        snprintf(u->dlc_note, sizeof u->dlc_note, "Wait for the current download to finish (or cancel it).");
-        play_sound(u->as, SND_CANCEL);
-        return;
-    }
-    char url[sizeof u->save->dlc_url] = "";
-    char *t = SDL_HasClipboardText() ? SDL_GetClipboardText() : NULL;
-    if (t) {
-        const char *s = t;
-        while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
-        size_t n = strlen(s);
-        while (n && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r' || s[n - 1] == '\n')) n--;
-        if (n < sizeof url) snprintf(url, sizeof url, "%.*s", (int)n, s);
-        SDL_free(t);
-    }
-    if (!net_url_ok(url)) {
-        snprintf(u->dlc_note, sizeof u->dlc_note, "Copy the http(s) download link of the .ipa first, then tap PASTE LINK.");
-        play_sound(u->as, SND_CANCEL);
-        return;
-    }
+    if (!dlc_busy(&st)) return false;
+    snprintf(u->dlc_note, sizeof u->dlc_note, "Wait for the current download to finish (or cancel it).");
+    play_sound(u->as, SND_CANCEL);
+    return true;
+}
+
+/* the saved download link changes and its pack list is read */
+static void dlc_set_link(UiState *u, const char *url) {
     u->dlc_note[0] = 0;
+    if (!strcmp(url, u->save->dlc_url)) return;
     snprintf(u->save->dlc_url, sizeof u->save->dlc_url, "%s", url);
     save_write(u->save);
     u->dlc_page = 0;
     play_sound(u->as, dlcdl_list(url) ? SND_HIT : SND_CANCEL);
+}
+
+/* appends printable ASCII (links only), trimmed of surrounding white space when `trim` */
+static void dlc_edit_append(UiState *u, const char *s, bool trim) {
+    size_t n = strlen(u->dlc_edit);
+    if (trim) while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    for (; *s && n + 1 < sizeof u->dlc_edit; s++)
+        if (*s > ' ' && *s < 0x7f) u->dlc_edit[n++] = *s;   /* links have no spaces or control characters */
+    u->dlc_edit[n] = 0;
+}
+
+/* the link field: typing edits a copy; Enter or a click elsewhere keeps it, Esc drops it */
+static void dlc_edit_begin(UiState *u, bool with_clipboard) {
+    if (dlc_refuse_busy(u)) return;
+    u->dlc_note[0] = 0;
+    u->dlc_editing = true;
+    u->dlc_text_was_on = SDL_IsTextInputActive();
+    SDL_StartTextInput();
+    snprintf(u->dlc_edit, sizeof u->dlc_edit, "%s", with_clipboard ? "" : u->save->dlc_url);
+    if (with_clipboard && SDL_HasClipboardText()) {
+        char *t = SDL_GetClipboardText();
+        if (t) { dlc_edit_append(u, t, true); SDL_free(t); }
+    }
+}
+
+static void dlc_edit_end(UiState *u, bool keep) {
+    if (!u->dlc_editing) return;
+    u->dlc_editing = false;
+    if (!u->dlc_text_was_on) SDL_StopTextInput();
+    if (!keep) { play_sound(u->as, SND_CANCEL); return; }
+    const char *url = u->dlc_edit[0] ? u->dlc_edit : DLC_DEFAULT_URL;   /* an emptied field: the built-in link */
+    if (!strcmp(url, u->save->dlc_url)) return;
+    if (dlc_refuse_busy(u)) return;
+    if (!net_url_ok(url)) {
+        snprintf(u->dlc_note, sizeof u->dlc_note, "Not an http(s) link to an .ipa file; the link was not changed.");
+        play_sound(u->as, SND_CANCEL);
+        return;
+    }
+    dlc_set_link(u, url);
+}
+
+static const SDL_FRect k_dlc_field = {24, 318, 592, 46};
+
+/* true: the event went to the link field being edited */
+static bool dlc_edit_event(UiState *u, const SDL_Event *e) {
+    if (e->type == SDL_TEXTINPUT) {
+        dlc_edit_append(u, e->text.text, false);
+        return true;
+    }
+    if (e->type == SDL_KEYDOWN) {
+        SDL_Keycode k = e->key.keysym.sym;
+        bool cmd = (SDL_GetModState() & (KMOD_CTRL | KMOD_GUI)) != 0;
+        size_t n = strlen(u->dlc_edit);
+        if (k == SDLK_BACKSPACE) {
+            if (cmd) u->dlc_edit[0] = 0;
+            else if (n) u->dlc_edit[n - 1] = 0;
+        } else if (cmd && k == SDLK_v && SDL_HasClipboardText()) {
+            char *t = SDL_GetClipboardText();
+            if (t) { dlc_edit_append(u, t, true); SDL_free(t); }
+        } else if (cmd && k == SDLK_c) {
+            SDL_SetClipboardText(u->dlc_edit);
+        } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+            dlc_edit_end(u, true);
+        } else if (k == SDLK_ESCAPE) {
+            dlc_edit_end(u, false);
+        }
+        return true;   /* every key: Esc and Backspace must not leave the page meanwhile */
+    }
+    if (e->type == SDL_KEYUP) return true;
+    if (e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT) {
+        if (in_frect(&k_dlc_field, (float)e->button.x, (float)e->button.y)) return true;
+        dlc_edit_end(u, true);   /* then the click does what it does */
+    }
+    return false;
+}
+
+/* ---- pack row icons (drawn: the port has no icon font) ---- */
+static void geo_quad(SDL_Renderer *r, const float *p, SDL_Color c) {
+    SDL_Vertex v[4];
+    for (int i = 0; i < 4; i++) v[i] = (SDL_Vertex){{p[2 * i], p[2 * i + 1]}, c, {0, 0}};
+    static const int idx[6] = {0, 1, 2, 0, 2, 3};
+    SDL_RenderGeometry(r, NULL, v, 4, idx, 6);
+}
+
+static void thick_line(SDL_Renderer *r, float x0, float y0, float x1, float y1, float w, SDL_Color c) {
+    float dx = x1 - x0, dy = y1 - y0, len = sqrtf(dx * dx + dy * dy);
+    if (len <= 0) return;
+    float nx = -dy / len * w * 0.5f, ny = dx / len * w * 0.5f;
+    float p[8] = {x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny};
+    geo_quad(r, p, c);
+}
+
+/* a ring (w > 0) or a disc (w = 0) */
+static void circle(SDL_Renderer *r, float cx, float cy, float rad, float w, SDL_Color c) {
+    enum { N = 40 };
+    SDL_Vertex v[2 * N];
+    int idx[6 * N], ni = 0;
+    float in = w > 0 ? rad - w : 0;
+    for (int i = 0; i < N; i++) {
+        float a = 6.2831853f * (float)i / N, ca = cosf(a), sa = sinf(a);
+        v[2 * i] = (SDL_Vertex){{cx + ca * rad, cy + sa * rad}, c, {0, 0}};
+        v[2 * i + 1] = (SDL_Vertex){{cx + ca * in, cy + sa * in}, c, {0, 0}};
+        int o0 = 2 * i, i0 = 2 * i + 1, o1 = 2 * ((i + 1) % N), i1 = 2 * ((i + 1) % N) + 1;
+        idx[ni++] = o0; idx[ni++] = o1; idx[ni++] = i1;
+        idx[ni++] = o0; idx[ni++] = i1; idx[ni++] = i0;
+    }
+    SDL_RenderGeometry(r, NULL, v, 2 * N, idx, ni);
+}
+
+enum { DLC_ICON_DOWNLOAD, DLC_ICON_INSTALLED, DLC_ICON_STOP };
+
+/* like the iOS page's arrow.down.circle / checkmark.circle.fill / stop.circle */
+static void dlc_icon(SDL_Renderer *r, int kind, float cx, float cy, float rad, SDL_Color c) {
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    float w = rad * 0.16f;
+    if (kind == DLC_ICON_INSTALLED) {
+        circle(r, cx, cy, rad, 0, c);
+        SDL_Color bg = {12, 16, 24, 255};
+        thick_line(r, cx - rad * 0.45f, cy + rad * 0.02f, cx - rad * 0.12f, cy + rad * 0.35f, w * 1.3f, bg);
+        thick_line(r, cx - rad * 0.12f, cy + rad * 0.35f, cx + rad * 0.48f, cy - rad * 0.32f, w * 1.3f, bg);
+        return;
+    }
+    circle(r, cx, cy, rad, w, c);
+    if (kind == DLC_ICON_STOP) {
+        float s = rad * 0.36f;
+        float p[8] = {cx - s, cy - s, cx + s, cy - s, cx + s, cy + s, cx - s, cy + s};
+        geo_quad(r, p, c);
+        return;
+    }
+    thick_line(r, cx, cy - rad * 0.5f, cx, cy + rad * 0.42f, w, c);   /* arrow down */
+    thick_line(r, cx - rad * 0.36f, cy + rad * 0.08f, cx + rad * 0.02f, cy + rad * 0.46f, w, c);
+    thick_line(r, cx + rad * 0.36f, cy + rad * 0.08f, cx - rad * 0.02f, cy + rad * 0.46f, w, c);
 }
 
 /* a pack row: download it, or cancel its running download */
@@ -1120,7 +1250,7 @@ static void dlc_pick(UiState *u, const DlcDlStatus *st, int idx) {
         play_sound(u->as, SND_CANCEL);
     } else if (!p->available) {   /* greyed: not in the linked IPA (or no link yet) */
         if (dlc_pack_songs(u, p->pack) < p->nsongs)
-            snprintf(u->dlc_note, sizeof u->dlc_note, "%s", u->save->dlc_url[0] ? "This pack is not in the linked IPA." : "Paste a link first.");
+            snprintf(u->dlc_note, sizeof u->dlc_note, "%s", u->save->dlc_url[0] ? "This pack is not in the linked IPA." : "Enter a download link first.");
         play_sound(u->as, SND_CANCEL);
     } else if (st->state == DLD_READY && dlcdl_install(p->pack)) {   /* installed packs: repairs / re-lists */
         play_sound(u->as, SND_HIT);
@@ -1137,13 +1267,13 @@ static int dlc_event(UiState *u, bool key, SDL_Keycode k, bool click, float mx, 
     int first = u->dlc_page * DLC_ROWS, shown = st.npacks - first;
     if (shown > DLC_ROWS) shown = DLC_ROWS;
     if (shown < 0) shown = 0;
-    int fixed = 2, rows = fixed + shown;
+    int fixed = dlc_fixed(u), rows = fixed + shown;
     if (key && (k == SDLK_UP || k == SDLK_DOWN || k == SDLK_LEFT || k == SDLK_RIGHT)) u->menu_kbd = true;
     if (click) u->menu_kbd = false;
     if (u->opt_row >= rows) u->opt_row = rows - 1;
     if (key && k == SDLK_UP) u->opt_row = (u->opt_row + rows - 1) % rows;
     if (key && k == SDLK_DOWN) u->opt_row = (u->opt_row + 1) % rows;
-    if (key && k == SDLK_v && (SDL_GetModState() & (KMOD_CTRL | KMOD_GUI))) { u->opt_row = 1; dlc_paste(u); return -1; }
+    if (key && k == SDLK_v && (SDL_GetModState() & (KMOD_CTRL | KMOD_GUI))) { u->opt_row = 1; dlc_edit_begin(u, true); return -1; }   /* paste into the field */
     int flip = 0;
     if (key && (k == SDLK_PAGEUP || ((k == SDLK_LEFT) && u->opt_row >= fixed))) flip = -1;
     if (key && (k == SDLK_PAGEDOWN || ((k == SDLK_RIGHT) && u->opt_row >= fixed))) flip = 1;
@@ -1163,8 +1293,10 @@ static int dlc_event(UiState *u, bool key, SDL_Keycode k, bool click, float mx, 
             u->opt_row = 0;
             bool on = mx < DLC_TOGGLE_X + DLC_TOGGLE_W;
             if (u->opt->show_dlc != on) opt_adjust(u, on ? -1 : 1);
-        } else if (in_frect(&k_dlc_paste, mx, my)) {
+        } else if (in_frect(&k_dlc_field, mx, my)) {
             act = u->opt_row = 1;
+        } else if (fixed > 2 && in_frect(&k_dlc_restore, mx, my)) {
+            act = u->opt_row = 2;
         } else if (my >= DLC_STATUS_Y - 10 && my < DLC_STATUS_Y + 66 && st.state == DLD_FAILED && u->save->dlc_url[0]) {
             u->dlc_note[0] = 0;
             play_sound(u->as, dlcdl_list(u->save->dlc_url) ? SND_HIT : SND_CANCEL);   /* retry */
@@ -1174,7 +1306,8 @@ static int dlc_event(UiState *u, bool key, SDL_Keycode k, bool click, float mx, 
         }
     }
     if (act == 0 && ok) opt_adjust(u, u->opt->show_dlc ? 1 : -1);
-    else if (act == 1) dlc_paste(u);
+    else if (act == 1) dlc_edit_begin(u, false);
+    else if (act == 2 && fixed > 2) { if (!dlc_refuse_busy(u)) dlc_set_link(u, DLC_DEFAULT_URL); }
     else if (act >= fixed) dlc_pick(u, &st, first + act - fixed);
     return -1;
 }
@@ -1249,7 +1382,7 @@ static void render_dlc(UiState *u) {
     bool have = dlc_installed(u), kbd = u->menu_kbd;
     DlcDlStatus st;
     dlcdl_status(&st);
-    int fixed = 2;
+    int fixed = dlc_fixed(u);
 
     SDL_SetRenderDrawColor(r, 12, 16, 24, 255);
     SDL_RenderClear(r);
@@ -1288,19 +1421,36 @@ static void render_dlc(UiState *u) {
     else snprintf(buf, sizeof buf, "No DLC songs installed");
     font_draw(r, buf, 320, 248, 2.0f, WHITE, 0);
 
-    /* download link and buttons */
-    font_draw(r, "Download link", 48, 294, 1.8f, teal, -1);
-    if (u->save->dlc_url[0]) {
+    /* download link: an editable field, and RESTORE DEFAULT LINK while it differs from the built-in one */
+    font_draw(r, "Download link", 48, 290, 1.8f, teal, -1);
+    if (!dlc_custom(u) && !u->dlc_editing) font_draw(r, "built-in", 600, 292, 1.5f, dim, 1);
+    bool editing = u->dlc_editing, field_focus = kbd && u->opt_row == 1;
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 255, 255, 255, editing ? 26 : 14);
+    SDL_RenderFillRectF(r, &k_dlc_field);
+    if (editing) SDL_SetRenderDrawColor(r, 27, 181, 176, 255);
+    else if (field_focus) SDL_SetRenderDrawColor(r, focus.r, focus.g, focus.b, 255);
+    else SDL_SetRenderDrawColor(r, 255, 255, 255, 60);
+    SDL_RenderDrawRectF(r, &k_dlc_field);
+    if (editing || field_focus) {
+        SDL_FRect in = {k_dlc_field.x + 1, k_dlc_field.y + 1, k_dlc_field.w - 2, k_dlc_field.h - 2};
+        SDL_RenderDrawRectF(r, &in);
+    }
+    if (editing) {   /* the end of the link and a blinking caret */
+        size_t n = strlen(u->dlc_edit);
+        const char *tail = n > 46 ? u->dlc_edit + n - 46 : u->dlc_edit;
+        snprintf(buf, sizeof buf, "%s%s%s", n > 46 ? "..." : "", tail, (SDL_GetTicks() / 500) % 2 ? "" : "|");
+        font_draw(r, buf, 38, k_dlc_field.y + 12, 1.6f, WHITE, -1);
+        font_draw(r, "Enter: use this link   Esc: cancel   empty: built-in link", 320, k_dlc_field.y + 56, 1.4f, dim, 0);
+    } else {
         const char *s = u->save->dlc_url;
         s += !strncmp(s, "https://", 8) ? 8 : !strncmp(s, "http://", 7) ? 7 : 0;
         size_t n = strlen(s);
         if (n > 46) snprintf(buf, sizeof buf, "%.18s...%s", s, s + n - 25);
         else snprintf(buf, sizeof buf, "%s", s);
-    } else {
-        snprintf(buf, sizeof buf, "none yet");
+        font_draw(r, buf, 38, k_dlc_field.y + 12, 1.6f, dim, -1);
+        if (dlc_custom(u)) dlc_button(r, &k_dlc_restore, "RESTORE DEFAULT LINK", kbd && u->opt_row == 2, !dlc_busy(&st));
     }
-    font_draw(r, buf, 48, 324, 1.6f, dim, -1);
-    dlc_button(r, &k_dlc_paste, "PASTE LINK", kbd && u->opt_row == 1, !dlc_busy(&st));
 
     /* status */
     SDL_Color sc = WHITE;
@@ -1309,7 +1459,7 @@ static void render_dlc(UiState *u) {
         snprintf(buf, sizeof buf, "%s", u->dlc_note);
         sc = bad;
     } else if (st.state == DLD_IDLE) {
-        snprintf(buf, sizeof buf, "Paste the link of an IPA with the DLC packs to download them.");
+        snprintf(buf, sizeof buf, "Enter the link of an IPA with the DLC packs to download them.");
     } else if (st.state == DLD_LISTING) {
         snprintf(buf, sizeof buf, "Reading the pack list...");
     } else if (st.state == DLD_INSTALLING) {
@@ -1349,7 +1499,7 @@ static void render_dlc(UiState *u) {
     if (st.npacks == 0) {
         if (st.state == DLD_LISTING) return;
         /* one sentence: what the link is for */
-        font_draw(r, "Paste the link of an IPA with the DLC packs", 320, DLC_ROW_Y(0) + 8, 1.8f, dim, 0);
+        font_draw(r, "Enter the link of an IPA with the DLC packs", 320, DLC_ROW_Y(0) + 8, 1.8f, dim, 0);
         font_draw(r, "to download them one by one.", 320, DLC_ROW_Y(0) + 40, 1.8f, dim, 0);
         return;
     }
@@ -1364,7 +1514,7 @@ static void render_dlc(UiState *u) {
             SDL_RenderDrawRectF(r, &fr);
         }
         char name[96], right[48];
-        fit_text(p->name, 26, name, sizeof name);
+        fit_text(p->name, 22, name, sizeof name);   /* room for the size and the icon */
         int inst = dlc_pack_songs(u, p->pack);
         bool grey = !p->available && inst < p->nsongs;   /* not offered by the link, not installed */
         SDL_Color rc = WHITE, nc = grey ? dim : WHITE, sc1 = grey ? (SDL_Color){110, 118, 128, 255} : WHITE,
@@ -1381,7 +1531,12 @@ static void render_dlc(UiState *u) {
             right[0] = 0;
         }
         font_draw(r, name, 40, y + 7, 2.2f, nc, -1);
-        if (right[0]) font_draw(r, right, 600, y + 9, 2.0f, rc, 1);
+        if (right[0]) font_draw(r, right, 546, y + 9, 2.0f, rc, 1);
+        /* tap target hint, as on iOS/Android: download, installed, or stop (tap again to cancel) */
+        bool busy_here = st.state == DLD_INSTALLING && st.busy_pack == p->pack;
+        int icon = busy_here ? DLC_ICON_STOP : inst >= p->nsongs ? DLC_ICON_INSTALLED : DLC_ICON_DOWNLOAD;
+        SDL_Color ic = grey ? (SDL_Color){90, 96, 106, 255} : busy_here ? focus : (SDL_Color){27, 181, 176, 255};
+        dlc_icon(r, icon, 584, y + 25, 17, ic);
         /* a line per song: English (or romanized) title, then the Japanese one dimmer; condensed to fit */
         int ns = p->nsongs < DLC_PACK_SONGS ? p->nsongs : DLC_PACK_SONGS;
         for (int k = 0; k < ns && k < 3; k++) {
@@ -1389,7 +1544,7 @@ static void render_dlc(UiState *u) {
             float sy = y + 38 + 21.0f * (float)k;
             const char *t1 = s->latin[0] ? s->latin : s->title, *t2 = s->latin[0] ? s->title : "";
             float w1 = font_plain_width(r, t1, 1.4f, sc1), w2 = t2[0] ? font_plain_width(r, t2, 1.4f, sc2) : 0.0f;
-            float gap = t2[0] ? 14.0f : 0.0f, f = w1 + gap + w2 > 560.0f ? 560.0f / (w1 + gap + w2) : 1.0f;
+            float gap = t2[0] ? 14.0f : 0.0f, f = w1 + gap + w2 > 528.0f ? 528.0f / (w1 + gap + w2) : 1.0f;   /* clear of the icon */
             font_draw_plain_fit(r, t1, 40, sy, 1.4f, sc1, -1, w1 * f);
             if (t2[0]) font_draw_plain_fit(r, t2, 40 + (w1 + gap) * f, sy, 1.4f, sc2, -1, w2 * f);
         }
@@ -1403,6 +1558,7 @@ static void render_dlc(UiState *u) {
 }
 
 static int option_event(UiState *u, const SDL_Event *e) {
+    if (u->opt_mode == OPT_DLC && u->dlc_editing && dlc_edit_event(u, e)) return -1;   /* the link field has the keys */
     if (volume_drag_event(u, e)) return -1;
     bool click = e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT;
     bool key = e->type == SDL_KEYDOWN && !e->key.repeat;

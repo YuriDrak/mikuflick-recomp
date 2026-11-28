@@ -2,7 +2,7 @@
 #include "dlcdl.h"
 #include <string.h>
 
-// Sections: songs toggle, download (link, paste, import, status), packs.
+// Sections: songs toggle, download (link field, Restore Default Link while it differs, import, status), packs.
 typedef NS_ENUM(NSInteger, MFDlcSection) {
     MFDlcSectionSongs,
     MFDlcSectionDownload,
@@ -11,7 +11,7 @@ typedef NS_ENUM(NSInteger, MFDlcSection) {
 
 typedef NS_ENUM(NSInteger, MFDlcRow) {
     MFDlcRowLink,
-    MFDlcRowPaste,
+    MFDlcRowRestore,   // only while the link is not DLC_DEFAULT_URL
     MFDlcRowImport,
     MFDlcRowStatus,
 };
@@ -29,7 +29,7 @@ static BOOL Busy(const DlcDlStatus *st) {
     return st->state == DLD_LISTING || st->state == DLD_INSTALLING;
 }
 
-@interface MFDlcViewController () {
+@interface MFDlcViewController () <UITextFieldDelegate> {
     DlcDlStatus _st;   // last polled downloader status
 }
 @property(nonatomic, assign) IosDlcPage *page;
@@ -37,6 +37,7 @@ static BOOL Busy(const DlcDlStatus *st) {
 @property(nonatomic, readwrite) BOOL wantsImport;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, strong) UISwitch *showSwitch;
+@property(nonatomic, strong) UITextField *linkField;
 @property(nonatomic) int shownPacks;
 @property(nonatomic) int shownSongs;
 @end
@@ -60,6 +61,7 @@ static BOOL Busy(const DlcDlStatus *st) {
                                                                                            action:@selector(doneTapped)];
     self.view.tintColor = MikuTeal();
     [self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:@"cell"];
+    [self.tableView registerClass:UITableViewCell.class forCellReuseIdentifier:@"link"];
 
     _showSwitch = [[UISwitch alloc] init];
     _showSwitch.onTintColor = MikuTeal();
@@ -112,9 +114,21 @@ static BOOL Busy(const DlcDlStatus *st) {
                                   withRowAnimation:UITableViewRowAnimationNone];   // its footer has the counts
         NSMutableArray<NSIndexPath *> *rows = [NSMutableArray array];
         for (NSIndexPath *ip in self.tableView.indexPathsForVisibleRows)
-            if (ip.section != MFDlcSectionSongs) [rows addObject:ip];
+            if (ip.section != MFDlcSectionSongs && !(ip.section == MFDlcSectionDownload && [self kindOfRow:ip.row] == MFDlcRowLink))
+                [rows addObject:ip];   // the link row keeps its field (and the player's typing)
         [self.tableView reconfigureRowsAtIndexPaths:rows];
     }];
+}
+
+// Download section rows: Restore Default Link only while the link differs from the built-in one
+- (BOOL)customLink {
+    return strcmp(self.page->url, DLC_DEFAULT_URL) != 0;
+}
+
+- (MFDlcRow)kindOfRow:(NSInteger)row {
+    if (row == 0) return MFDlcRowLink;
+    if (![self customLink]) row++;
+    return row == 1 ? MFDlcRowRestore : row == 2 ? MFDlcRowImport : MFDlcRowStatus;
 }
 
 - (NSString *)packName:(int)pack {
@@ -140,7 +154,7 @@ static BOOL Busy(const DlcDlStatus *st) {
         for (int i = 0; i < _st.npacks; i++) n += _st.packs[i].available;
         return [NSString stringWithFormat:@"The link has %d of the %d packs.", n, _st.npacks];
     }
-    default: return @"No link yet.";
+    default: return @"Enter a download link.";
     }
 }
 
@@ -170,41 +184,44 @@ static BOOL Busy(const DlcDlStatus *st) {
     return YES;
 }
 
-- (void)pasteLink {
-    if ([self refuseWhileBusy]) return;
-    NSString *s = [UIPasteboard.generalPasteboard.string stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    const char *url = s.UTF8String;
-    if (!url || strlen(url) >= sizeof self.page->url || !net_url_ok(url)) {
-        [self alertTitle:@"No Link on the Clipboard"
-                 message:@"Copy the direct http(s) download link of an IPA that includes the DLC packs, then tap Paste Link."];
-        return;
-    }
-    snprintf(self.page->url, sizeof self.page->url, "%s", url);   // saved by the page's tick
-    dlcdl_list(self.page->url);
-    [self refresh];
-    [self.tableView reloadData];
+// the link row's field: an empty field means the built-in link; anything else must be an http(s) link
+- (BOOL)textFieldShouldBeginEditing:(UITextField *)field {
+    return ![self refuseWhileBusy];
 }
 
-- (void)linkOptions:(UIView *)source {
-    if (!self.page->url[0]) {
-        [self pasteLink];
+- (BOOL)textFieldShouldReturn:(UITextField *)field {
+    [field resignFirstResponder];
+    return NO;
+}
+
+- (void)textFieldDidEndEditing:(UITextField *)field {
+    NSString *s = [field.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    const char *url = s.length ? s.UTF8String : DLC_DEFAULT_URL;
+    if (!url || !strcmp(url, self.page->url) || Busy(&_st)) {   // unchanged, or a download started meanwhile
+        field.text = Str(self.page->url);
         return;
     }
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Download Link"
-                                                               message:Str(self.page->url)
-                                                        preferredStyle:UIAlertControllerStyleActionSheet];
-    __weak typeof(self) weakSelf = self;
-    [a addAction:[UIAlertAction actionWithTitle:@"Reload Pack List" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
-        typeof(self) me = weakSelf;
-        if (me && ![me refuseWhileBusy]) { dlcdl_list(me.page->url); [me refresh]; }
-    }]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Copy Link" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
-        typeof(self) me = weakSelf;
-        if (me) UIPasteboard.generalPasteboard.string = Str(me.page->url);
-    }]];
-    [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    a.popoverPresentationController.sourceView = source;
-    [self presentViewController:a animated:YES completion:nil];
+    if (strlen(url) >= sizeof self.page->url || !net_url_ok(url)) {
+        field.text = Str(self.page->url);
+        [self alertTitle:@"Not a Download Link"
+                 message:@"Enter the direct http(s) download link of an IPA that includes the DLC packs. The link was not changed."];
+        return;
+    }
+    [self setLink:url];
+}
+
+- (void)setLink:(const char *)url {
+    snprintf(self.page->url, sizeof self.page->url, "%s", url);   // saved by the page's tick
+    self.linkField.text = Str(self.page->url);
+    dlcdl_list(self.page->url);
+    [self refresh];
+    [self.tableView reloadData];   // Restore Default Link comes or goes
+}
+
+- (void)restoreDefaultLink {
+    if ([self refuseWhileBusy]) return;
+    [self.view endEditing:YES];
+    [self setLink:DLC_DEFAULT_URL];
 }
 
 - (void)packTapped:(int)index {
@@ -239,7 +256,7 @@ static BOOL Busy(const DlcDlStatus *st) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == MFDlcSectionSongs) return 1;
-    if (section == MFDlcSectionDownload) return 4;
+    if (section == MFDlcSectionDownload) return [self customLink] ? 4 : 3;
     return _st.npacks;
 }
 
@@ -256,7 +273,7 @@ static BOOL Busy(const DlcDlStatus *st) {
                                           self.page->installed_packs == 1 ? @"" : @"s", self.page->installed_songs];
     }
     if (section == MFDlcSectionDownload)
-        return @"The link starts as the archive.org copy of the “All DLC Included” IPA. Paste the link of another IPA with the DLC packs to use that one.";
+        return @"Packs download from this link. It starts as the archive.org copy of the “All DLC Included” IPA; enter the link of another IPA with the DLC packs to use that one.";
     return @"Tap a pack to download it, or tap it again to cancel.";
 }
 
@@ -289,6 +306,57 @@ static NSString *NoBreak(NSString *s) {
     return s;
 }
 
+// the link row: a caption over an editable field (built once, kept across reloads)
+- (UITableViewCell *)linkCell:(UITableView *)tableView at:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"link" forIndexPath:indexPath];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    if (!self.linkField) {
+        UITextField *f = [[UITextField alloc] init];
+        f.delegate = self;
+        f.keyboardType = UIKeyboardTypeURL;
+        f.textContentType = UITextContentTypeURL;
+        f.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        f.autocorrectionType = UITextAutocorrectionTypeNo;
+        f.spellCheckingType = UITextSpellCheckingTypeNo;
+        f.returnKeyType = UIReturnKeyGo;
+        f.clearButtonMode = UITextFieldViewModeWhileEditing;
+        f.placeholder = @"https://…/file.ipa";
+        f.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+        f.adjustsFontForContentSizeCategory = YES;
+        self.linkField = f;
+    }
+    if (self.linkField.superview != cell.contentView) {
+        UIImageSymbolConfiguration *sym = [UIImageSymbolConfiguration configurationWithPointSize:17.0 weight:UIImageSymbolWeightMedium];
+        UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"link" withConfiguration:sym]];
+        icon.tintColor = MikuTeal();
+        icon.contentMode = UIViewContentModeCenter;
+        UILabel *caption = [[UILabel alloc] init];
+        caption.text = @"Download Link";
+        caption.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        caption.textColor = UIColor.secondaryLabelColor;
+        UIStackView *texts = [[UIStackView alloc] initWithArrangedSubviews:@[caption, self.linkField]];
+        texts.axis = UILayoutConstraintAxisVertical;
+        texts.spacing = 2;
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[icon, texts]];
+        row.axis = UILayoutConstraintAxisHorizontal;
+        row.alignment = UIStackViewAlignmentCenter;
+        row.spacing = 16;
+        row.translatesAutoresizingMaskIntoConstraints = NO;
+        for (UIView *v in cell.contentView.subviews) [v removeFromSuperview];
+        [cell.contentView addSubview:row];
+        UILayoutGuide *g = cell.contentView.layoutMarginsGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            [icon.widthAnchor constraintEqualToConstant:24],
+            [row.leadingAnchor constraintEqualToAnchor:g.leadingAnchor],
+            [row.trailingAnchor constraintEqualToAnchor:g.trailingAnchor],
+            [row.topAnchor constraintEqualToAnchor:g.topAnchor],
+            [row.bottomAnchor constraintEqualToAnchor:g.bottomAnchor],
+        ]];
+    }
+    if (!self.linkField.isEditing) self.linkField.text = Str(self.page->url);   // never under the player's typing
+    return cell;
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"cell" forIndexPath:indexPath];
     UIView *oldAccessory = cell.accessoryView;   // a pack row keeps its label: a new one would slide in from the top
@@ -310,19 +378,13 @@ static NSString *NoBreak(NSString *s) {
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         if (!have) c.textProperties.color = UIColor.secondaryLabelColor;
     } else if (indexPath.section == MFDlcSectionDownload) {
-        switch (indexPath.row) {
-        case MFDlcRowLink: {
-            c.text = @"Download Link";
-            c.image = [UIImage systemImageNamed:@"link" withConfiguration:sym];
-            c.secondaryText = self.page->url[0] ? Str(self.page->url) : @"None yet";
-            c.secondaryTextProperties.numberOfLines = 1;
-            c.secondaryTextProperties.lineBreakMode = NSLineBreakByTruncatingMiddle;
-            break;
-        }
-        case MFDlcRowPaste:
+        switch ([self kindOfRow:indexPath.row]) {
+        case MFDlcRowLink:
+            return [self linkCell:tableView at:indexPath];
+        case MFDlcRowRestore:
             c = [UIListContentConfiguration cellConfiguration];
-            c.text = @"Paste Link";
-            c.image = [UIImage systemImageNamed:@"doc.on.clipboard" withConfiguration:sym];
+            c.text = @"Restore Default Link";
+            c.image = [UIImage systemImageNamed:@"arrow.counterclockwise" withConfiguration:sym];
             c.textProperties.color = Busy(&_st) ? UIColor.secondaryLabelColor : MikuTeal();
             break;
         case MFDlcRowImport:
@@ -402,16 +464,16 @@ static NSString *NoBreak(NSString *s) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.section == MFDlcSectionSongs && self.page->installed_songs <= 0) {   // the switch is disabled: say why
         UIAlertController *a = [UIAlertController alertControllerWithTitle:@"No DLC Songs Yet"
-                                                                   message:@"DLC songs come from an IPA that includes the DLC packs."
+                                                                   message:@"Download a pack below, or import an IPA that includes the DLC packs."
                                                             preferredStyle:UIAlertControllerStyleAlert];
         [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:a animated:YES completion:nil];
         return;
     }
     if (indexPath.section == MFDlcSectionDownload) {
-        switch (indexPath.row) {
-        case MFDlcRowLink: [self linkOptions:[tableView cellForRowAtIndexPath:indexPath] ?: tableView]; break;
-        case MFDlcRowPaste: [self pasteLink]; break;
+        switch ([self kindOfRow:indexPath.row]) {
+        case MFDlcRowLink: [self.linkField becomeFirstResponder]; break;
+        case MFDlcRowRestore: [self restoreDefaultLink]; break;
         case MFDlcRowImport:
             if (![self refuseWhileBusy]) {   // the importer replaces the folder packs are written to
                 self.wantsImport = YES;
