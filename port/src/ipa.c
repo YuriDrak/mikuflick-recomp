@@ -21,8 +21,9 @@
  * Nothing is ever written outside `dir`. Archive paths with "..", absolute
  * paths or backslashes are refused.
  *
- * The archive is read through a ZipSrc (here a local fd), so the reader does not
- * depend on where the archive is.
+ * The archive is read through a ZipSrc (a local fd here, HTTP range requests in
+ * net.c), so the same reader serves dlc_catalog_* at the end of this file: the pack
+ * list of a remote IPA with DLC and the install of single packs (DLC page).
  */
 #define _FILE_OFFSET_BITS 64
 #include "mf.h"
@@ -793,4 +794,322 @@ out:
     free(out_name);
     free(ents);
     return ok;
+}
+
+/* ---------------- per-pack DLC install (DLC page downloads, --dlc-get) ----------------
+   Works on any ZipSrc, but is meant for net.c: an IPA with the DLC container is ~7.6 GB, a pack
+   ~280 MB. Reads the central directory and the original save (the song table), then only the
+   files of the packs the player picks. */
+
+struct DlcCatalog {
+    const ZipSrc *src;
+    Entry *ents;
+    int n;
+    DlcSong *songs;
+    int nsongs;
+};
+
+#define PACK_FILES 64
+
+static const Entry *pack_entry(const DlcCatalog *c, int pack, const char *name) {
+    for (int i = 0; i < c->n; i++) {
+        if (dlc_pack_id(c->ents[i].name) != pack) continue;
+        const char *dn = dlc_pack_file(c->ents[i].name);
+        if (dn && !strcmp(dn, name)) return &c->ents[i];
+    }
+    return NULL;
+}
+
+/* archive entries of a song: movie, art sheet, preview (optional). False if movie or art is missing. */
+static bool song_entries(const DlcCatalog *c, const DlcSong *s, const Entry *out[3]) {
+    char name[80];
+    snprintf(name, sizeof name, "%s.usm", s->movie);
+    out[0] = pack_entry(c, s->pack, name);
+    snprintf(name, sizeof name, "%s.png", s->atlas);
+    out[1] = pack_entry(c, s->pack, name);
+    out[2] = NULL;
+    if (s->preview[0]) {
+        snprintf(name, sizeof name, "%s.adx", s->preview);
+        out[2] = pack_entry(c, s->pack, name);
+    }
+    return out[0] && out[1];
+}
+
+/* distinct files the songs of a pack need (several songs share one art sheet) */
+static int pack_files(const DlcCatalog *c, int pack, const Entry **out, int max) {
+    int n = 0;
+    for (int i = 0; i < c->nsongs; i++) {
+        const Entry *f[3];
+        if (c->songs[i].pack != pack || !song_entries(c, &c->songs[i], f)) continue;
+        for (int k = 0; k < 3; k++) {
+            bool dup = !f[k];
+            for (int m = 0; m < n && !dup; m++) dup = out[m] == f[k];
+            if (!dup && n < max) out[n++] = f[k];
+        }
+    }
+    return n;
+}
+
+/* "Duet_Pack01" -> "Duet Pack" (*num = 1) */
+static void pack_title(const char *raw, int pack, char *out, size_t cap, int *num) {
+    snprintf(out, cap, "%s", raw);
+    size_t n = strlen(out);
+    while (n && out[n - 1] >= '0' && out[n - 1] <= '9') n--;
+    *num = atoi(out + n);
+    while (n && (out[n - 1] == '_' || out[n - 1] == ' ')) n--;
+    out[n] = 0;
+    for (char *p = out; *p; p++)
+        if (*p == '_') *p = ' ';
+    if (!out[0]) snprintf(out, cap, "Pack %d", pack);
+}
+
+DlcCatalog *dlc_catalog_open(const ZipSrc *src, char *err, size_t errlen) {
+    crc_init();
+    DlcCatalog *c = calloc(1, sizeof *c);
+    if (!c) { seterr(err, errlen, "Out of memory."); return NULL; }
+    c->src = src;
+    c->ents = read_directory(src, &c->n, err, errlen);
+    if (!c->ents) { free(c); return NULL; }
+    const Entry *save_e = NULL;
+    int npack = 0;
+    for (int i = 0; i < c->n; i++) {
+        if (!strcmp(c->ents[i].name, DLC_SAVE_PATH)) save_e = &c->ents[i];
+        npack += dlc_pack_file(c->ents[i].name) != NULL;
+    }
+    if (!save_e || !npack) {
+        seterr(err, errlen, "This IPA has no DLC packs. The link must point to an IPA that includes them (Container/ folder).");
+        goto fail;
+    }
+    if (save_e->usize == 0 || save_e->usize > MAX_SAVE) { seterr(err, errlen, "Damaged archive (%s).", DLC_SAVE_PATH); goto fail; }
+    Job j = {.label = "DLC song list"};
+    j.mem = malloc((size_t)save_e->usize);
+    j.mem_cap = (size_t)save_e->usize;
+    if (!j.mem) { seterr(err, errlen, "Out of memory."); goto fail; }
+    bool got = extract(src, save_e, &j, err, errlen);
+    char why[200] = "";
+    if (got) c->nsongs = dlc_read_songs(j.mem, j.mem_n, &c->songs, why, sizeof why);
+    free(j.mem);
+    if (!got) goto fail;
+    if (c->nsongs < 0) { seterr(err, errlen, "The DLC song list in this IPA cannot be read: %s.", why); goto fail; }
+    return c;
+fail:
+    dlc_catalog_free(c);
+    return NULL;
+}
+
+void dlc_catalog_free(DlcCatalog *c) {
+    if (!c) return;
+    free(c->songs);
+    free(c->ents);
+    free(c);
+}
+
+int dlc_catalog_packs(const DlcCatalog *c, DlcPackInfo *out, int max) {
+    int np = 0, num[256];
+    if (max > 256) max = 256;
+    for (int i = 0; i < c->nsongs; i++) {
+        const DlcSong *s = &c->songs[i];
+        const Entry *f[3];
+        if (!song_entries(c, s, f)) continue;
+        int k = 0;
+        while (k < np && out[k].pack != s->pack) k++;
+        if (k == np) {
+            if (np == max) continue;
+            memset(&out[np], 0, sizeof out[np]);
+            out[np].pack = s->pack;
+            pack_title(s->pack_name, s->pack, out[np].name, sizeof out[np].name, &num[np]);
+            np++;
+        }
+        DlcPackInfo *p = &out[k];
+        if (p->nsongs < DLC_PACK_SONGS) {
+            DlcPackSong *ps = &p->songs[p->nsongs];
+            snprintf(ps->title, sizeof ps->title, "%s", s->title);
+            dlc_song_latin(s->movie, s->title, ps->latin, sizeof ps->latin);
+        }
+        p->nsongs++;
+    }
+    for (int k = 0; k < np; k++) {
+        const Entry *f[PACK_FILES];
+        int nf = pack_files(c, out[k].pack, f, PACK_FILES);
+        for (int m = 0; m < nf; m++) out[k].bytes += f[m]->csize;
+    }
+    bool shared[256] = {false};   /* "MikuFlick_Pack01".."04": keep the number where names repeat */
+    for (int k = 0; k < np; k++)
+        for (int m = 0; m < np && !shared[k]; m++) shared[k] = m != k && !strcmp(out[m].name, out[k].name);
+    for (int k = 0; k < np; k++) {
+        if (shared[k] && num[k] > 0) {
+            size_t l = strlen(out[k].name);
+            snprintf(out[k].name + l, sizeof out[k].name - l, " %d", num[k]);
+        }
+    }
+    for (int a = 1; a < np; a++)   /* by pack number */
+        for (int b = a; b > 0 && out[b - 1].pack > out[b].pack; b--) {
+            DlcPackInfo t = out[b];
+            out[b] = out[b - 1];
+            out[b - 1] = t;
+        }
+    return np;
+}
+
+/* a built-in song of gamedata uses this file name (never replaced by a pack file) */
+static bool base_uses(const char *gd_text, const char *name) {
+    const char *dot = strrchr(name, '.');
+    if (!gd_text || !dot) return false;
+    size_t stem = (size_t)(dot - name);
+    for (const char *l = gd_text; l && *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : NULL) {
+        if (strncmp(l, "song ", 5)) continue;
+        char pv[64], mv[64], art[64];
+        if (sscanf(l + 5, "%*d %63s %63s %63s", pv, mv, art) != 3) continue;
+        if ((strlen(pv) == stem && !strncmp(pv, name, stem)) || (strlen(mv) == stem && !strncmp(mv, name, stem)) ||
+            (strlen(art) == stem && !strncmp(art, name, stem)))
+            return true;
+    }
+    return false;
+}
+
+typedef struct {
+    int pack;
+    char movie[64];
+    const char *line;   /* in the old gamedata text, '\n' terminated */
+} OldDlc;
+
+/* gamedata.txt with fresh "dlc" lines: the catalog's songs whose files are in app_dir, plus earlier
+   DLC songs (other IPAs or imports) that are still installed, in pack order */
+static bool rewrite_gamedata(const DlcCatalog *c, const char *app_dir, const char *gamedata, char *gd_text, char *err,
+                             size_t errlen) {
+    char tmp[1100];
+    snprintf(tmp, sizeof tmp, "%s.dlc.tmp", gamedata);
+    FILE *f = fopen(tmp, "w");
+    if (!f) { seterr(err, errlen, "Cannot write %s (%s).", tmp, strerror(errno)); return false; }
+    int nold = 0, cap = 0;
+    OldDlc *old = NULL;
+    for (char *l = gd_text; l && *l;) {
+        char *nl = strchr(l, '\n');
+        size_t len = nl ? (size_t)(nl - l) : strlen(l);
+        if (strncmp(l, "dlc ", 4)) {
+            fwrite(l, 1, len, f);
+            fputc('\n', f);
+        } else {
+            OldDlc o = {.line = l};
+            char pv[64], atlas[64], name[80];
+            if (sscanf(l + 4, "%*d %d %*d %*d %63s %63s %63s", &o.pack, pv, o.movie, atlas) == 4 && !strchr(o.movie, '/') &&
+                !strchr(atlas, '/')) {
+                snprintf(name, sizeof name, "%s.usm", o.movie);
+                bool ok = have_in_dir((void *)app_dir, name);
+                snprintf(name, sizeof name, "%s.png", atlas);
+                if (ok && have_in_dir((void *)app_dir, name)) {
+                    if (nold == cap) {
+                        OldDlc *v = realloc(old, (size_t)(cap ? cap * 2 : 64) * sizeof *v);
+                        if (v) { old = v; cap = cap ? cap * 2 : 64; }
+                    }
+                    if (nold < cap) old[nold++] = o;   /* out of memory: the song is dropped, not the file */
+                }
+            }
+        }
+        l = nl ? nl + 1 : NULL;
+    }
+    /* pack ids in use, ascending */
+    int packs[256], np = 0;
+    for (int i = 0; i < c->nsongs + nold; i++) {
+        int p = i < c->nsongs ? c->songs[i].pack : old[i - c->nsongs].pack;
+        if (i < c->nsongs && !dlc_song_files_present(&c->songs[i], have_in_dir, (void *)app_dir)) continue;
+        bool dup = false;
+        for (int k = 0; k < np && !dup; k++) dup = packs[k] == p;
+        if (dup || np == 256) continue;
+        int k = np++;
+        while (k > 0 && packs[k - 1] > p) { packs[k] = packs[k - 1]; k--; }
+        packs[k] = p;
+    }
+    int written = 0;
+    for (int k = 0; k < np; k++) {
+        for (int i = 0; i < c->nsongs; i++)
+            if (c->songs[i].pack == packs[k] && dlc_song_files_present(&c->songs[i], have_in_dir, (void *)app_dir)) {
+                dlc_print_song(&c->songs[i], f);
+                written++;
+            }
+        for (int i = 0; i < nold; i++) {
+            if (old[i].pack != packs[k]) continue;
+            bool fresh = false;
+            for (int s = 0; s < c->nsongs && !fresh; s++)
+                fresh = !strcmp(c->songs[s].movie, old[i].movie) &&
+                        dlc_song_files_present(&c->songs[s], have_in_dir, (void *)app_dir);
+            if (fresh) continue;
+            const char *e = strchr(old[i].line, '\n');
+            fwrite(old[i].line, 1, e ? (size_t)(e - old[i].line) : strlen(old[i].line), f);
+            fputc('\n', f);
+            written++;
+        }
+    }
+    free(old);
+    if (fclose(f) != 0) { remove(tmp); seterr(err, errlen, "Could not write %s (storage full?).", tmp); return false; }
+    if (rename(tmp, gamedata) != 0) { remove(tmp); seterr(err, errlen, "Cannot replace %s (%s).", gamedata, strerror(errno)); return false; }
+    log_msg("dlc: gamedata now lists %d DLC songs", written);
+    return true;
+}
+
+bool dlc_catalog_install(DlcCatalog *c, int pack, const char *app_dir, const char *gamedata, IpaProgress cb, void *ud,
+                         const volatile int *cancel, char *err, size_t errlen) {
+    if (strlen(app_dir) > 1000 || strlen(gamedata) > 1000) { seterr(err, errlen, "Storage path too long."); return false; }
+    const Entry *files[PACK_FILES];
+    int nf = pack_files(c, pack, files, PACK_FILES);
+    if (!nf) { seterr(err, errlen, "Pack %d is not in this IPA.", pack); return false; }
+    struct stat st;
+    char *gd_text = read_file(gamedata, NULL);
+    if (stat(app_dir, &st) != 0 || !S_ISDIR(st.st_mode) || !gd_text ||
+        (strncmp(gd_text, "song ", 5) && !strstr(gd_text, "\nsong "))) {
+        free(gd_text);
+        seterr(err, errlen, "Import the game first (no game data in %s).", app_dir);
+        return false;
+    }
+    bool todo[PACK_FILES];
+    uint64_t need_u = 0, total_c = 0;
+    char path[1200], part[1210];
+    for (int i = 0; i < nf; i++) {
+        const char *name = dlc_pack_file(files[i]->name);
+        snprintf(path, sizeof path, "%s/%s", app_dir, name);
+        todo[i] = !(stat(path, &st) == 0 && S_ISREG(st.st_mode) && (uint64_t)st.st_size == files[i]->usize);
+        if (todo[i] && base_uses(gd_text, name)) {   /* never over a file of the base game */
+            log_msg("dlc: %s is a file of the base game, not replaced", name);
+            todo[i] = false;
+        }
+        if (todo[i]) { need_u += files[i]->usize; total_c += files[i]->csize; }
+    }
+    struct statvfs vfs;
+    if (statvfs(app_dir, &vfs) == 0) {
+        uint64_t avail = (uint64_t)vfs.f_bavail * vfs.f_frsize, want = need_u + (16u << 20);
+        if (avail < want) {
+            free(gd_text);
+            seterr(err, errlen, "Not enough free space: this pack needs %llu MB, %llu MB are free.",
+                   (unsigned long long)(want >> 20), (unsigned long long)(avail >> 20));
+            return false;
+        }
+    }
+    Job j = {.cb = cb, .ud = ud, .total_c = total_c};
+    for (int i = 0; i < nf; i++) {
+        if (!todo[i]) continue;
+        const char *name = dlc_pack_file(files[i]->name);
+        if (cancel && *cancel) { free(gd_text); seterr(err, errlen, "Cancelled."); return false; }
+        snprintf(path, sizeof path, "%s/%s", app_dir, name);
+        snprintf(part, sizeof part, "%s.part", path);
+        j.f = fopen(part, "wb");
+        if (!j.f) { free(gd_text); seterr(err, errlen, "Cannot write %s (%s).", part, strerror(errno)); return false; }
+        j.label = name;
+        if (cb) cb(ud, total_c ? (double)j.done_c / (double)total_c : 0, name);
+        bool good = extract(c->src, files[i], &j, err, errlen);
+        if (fclose(j.f) != 0 && good) { good = false; seterr(err, errlen, "Could not write %s (storage full?).", name); }
+        j.f = NULL;
+        if (good && rename(part, path) != 0) { good = false; seterr(err, errlen, "Cannot write %s (%s).", path, strerror(errno)); }
+        if (!good) {
+            remove(part);
+            if (cancel && *cancel) seterr(err, errlen, "Cancelled.");
+            free(gd_text);
+            return false;
+        }
+    }
+    bool ok = rewrite_gamedata(c, app_dir, gamedata, gd_text, err, errlen);
+    free(gd_text);
+    if (!ok) return false;
+    if (cb) cb(ud, 1.0, "done");
+    log_msg("dlc: pack %d installed (%d files, %llu MB downloaded) into %s", pack, nf, (unsigned long long)(total_c >> 20), app_dir);
+    return true;
 }

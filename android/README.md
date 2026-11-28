@@ -109,7 +109,7 @@ file providers. Not measured yet: audio latency on different phones.
 | `app/src/main/java/.../MikuFlickActivity.java` | `SDLActivity` subclass: library list, intent arguments, native pages over the game (`port/src/android.c`), system file picker for the IPA (fd passed to `port/src/ipa.c`) |
 | `app/src/main/java/.../NativePage.java`, `ImportPage.java`, `DlcPage.java` | native screens of plain framework views (device theme, Android 7+): the IPA import screen and the DLC page, the counterparts of `ios/App/ImportViewController.m` and `DlcViewController.m` |
 | `app/src/main/res/drawable/` | Material icons (Apache 2.0) for those screens |
-| `app/src/main/AndroidManifest.xml` | portrait, fullscreen, no permissions |
+| `app/src/main/AndroidManifest.xml` | portrait, fullscreen; INTERNET only for DLC pack downloads (DLC page) |
 | `../ios/` | iOS port: CMake/Makefile, native Files picker, scene-based lifecycle |
 
 ## Not done yet

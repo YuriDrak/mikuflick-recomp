@@ -87,6 +87,10 @@ void save_load(SaveData *s, const char *dir, const GameData *gd) {
                 s->timing[song] = score < -10 ? -10 : score > 10 ? 10 : score;
                 has_timing = true;
             } else records_load_line(s, line);   /* RECORDS: recx / flk lines */
+        } else if (!strncmp(raw, "url ", 4)) {
+            snprintf(s->dlc_url, sizeof s->dlc_url, "%s", raw + 4);
+            s->dlc_url[strcspn(s->dlc_url, "\r\n")] = 0;
+            if (!net_url_ok(s->dlc_url)) s->dlc_url[0] = 0;
         } else if (sscanf(raw, "opt %31s %f", key, &fv) == 2) {
             Options *o = &s->opt;
             s->has_opt = true;
@@ -121,6 +125,7 @@ void save_write(const SaveData *s) {
                 o->left_hand, o->keyboard, o->flower, o->guide_panel, o->pause_button);
         fprintf(f, "opt show_dlc %d\n", o->show_dlc);
     }
+    if (s->dlc_url[0]) fprintf(f, "url %s\n", s->dlc_url);
     for (int i = 0; i < MAX_SONGS; i++) {
         if (!save_song_key(s, i, key, sizeof key)) continue;
         for (int d = 0; d < NUM_DIFF; d++) {

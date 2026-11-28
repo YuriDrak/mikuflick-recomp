@@ -77,6 +77,7 @@ typedef struct {
 bool gamedata_load(GameData *gd, const char *path);
 
 /* ---------------- bplist.c ---------------- */
+#include "dlcdl.h"
 #include "bplist.h"
 
 /* ---------------- atlas.c ---------------- */
@@ -166,13 +167,33 @@ bool android_page_action(char *buf, size_t cap);   /* the page's next action, fa
 void android_import_state(int phase, double frac, const char *file, const char *err);
 void android_dlc_state(const char *state, size_t len);   /* DlcPage.java setState: see main.c android_dlc_page */
 
-/* Random access to a zip (ipa.c reads the IPA through it; for now a local file). read returns false
-   on any error; it may be called from a worker thread. */
+/* Random access to a zip: a local file, or HTTP range requests (net.c). read returns false on any
+   error (or when cancelled); it may be called from a worker thread. */
 typedef struct ZipSrc {
     bool (*read)(void *ud, uint64_t off, void *dst, size_t n);
     void *ud;
     uint64_t size;
 } ZipSrc;
+
+/* Per-pack DLC install from an IPA with the DLC container ("All DLC Included"), usually read over
+   the network: only the directory, the original save and the chosen pack's files are fetched. */
+typedef struct DlcCatalog DlcCatalog;
+DlcCatalog *dlc_catalog_open(const ZipSrc *src, char *err, size_t errlen);
+int dlc_catalog_packs(const DlcCatalog *c, DlcPackInfo *out, int max);
+/* Writes the pack's files into app_dir (verified, *.part then renamed; files already there with the
+   right size are skipped) and rewrites the "dlc" lines of gamedata. cancel (may be NULL) is polled. */
+bool dlc_catalog_install(DlcCatalog *c, int pack, const char *app_dir, const char *gamedata, IpaProgress cb, void *ud,
+                         const volatile int *cancel, char *err, size_t errlen);
+void dlc_catalog_free(DlcCatalog *c);
+
+/* ---------------- net.c ---------------- */
+/* An http(s) URL as a ZipSrc (range requests; desktop: the curl tool, Android: Java, iOS: NSURLSession).
+   cancel (may be NULL) makes reads fail soon after it becomes nonzero. */
+ZipSrc *net_open(const char *url, const volatile int *cancel, char *err, size_t errlen);
+void net_close(ZipSrc *z);
+const char *net_error(const ZipSrc *z);   /* reason the last read failed, or NULL */
+
+/* ---------------- dlcdl.c: see dlcdl.h ---------------- */
 
 /* ---------------- view.c ---------------- */
 /* Scenes draw into a 640x960 target between view_begin and view_present, which shows
@@ -249,6 +270,7 @@ typedef struct {
     size_t keep_len;
     bool has_opt;            /* options stored in the save file */
     Options opt;             /* only the persistent fields are used */
+    char dlc_url[512];       /* DLC page: link to an IPA with the DLC packs ("" = none) */
     char path[1024];
 } SaveData;
 void save_load(SaveData *s, const char *dir, const GameData *gd);
@@ -312,6 +334,7 @@ void font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scal
 void font_draw_plain(SDL_Renderer *ren, const char *text, float x, float y, float scale, SDL_Color col, int align); /* no shadow */
 void font_draw_plain_fit(SDL_Renderer *ren, const char *text, float x, float y, float scale, SDL_Color col, int align,
                          float max_w);   /* condensed to at most max_w px wide */
+float font_plain_width(SDL_Renderer *ren, const char *text, float scale, SDL_Color col);
 void bitmap_font_draw(SDL_Renderer *ren, const char *text, float x, float y, float scale, SDL_Color col, int align);
 bool text_init(const char *font_path);   /* NULL = search; "none" = bitmap only */
 bool text_has_glyph(Uint32 cp);           /* false: no TrueType font, or it lacks this code point */

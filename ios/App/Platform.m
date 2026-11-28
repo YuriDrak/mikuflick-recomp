@@ -100,3 +100,59 @@ bool ios_dlc_screen(SDL_Window *window, IosDlcPage *page) {
     }
     return import;
 }
+
+/* DLC page downloads (port/src/net.c): bytes [off, off + len) of url with a range request, on the
+   caller's (worker) thread. Returns 1 ok, 0 retry, -1 do not retry; final_url gets the URL after
+   redirects so net.c can reuse it. */
+int ios_http_range(const char *url, uint64_t off, size_t len, uint8_t *dst, uint64_t *total, char *final_url,
+                   size_t final_cap, char *err, size_t errlen) {
+    @autoreleasepool {
+        final_url[0] = 0;
+        NSURL *u = [NSURL URLWithString:[NSString stringWithUTF8String:url]];
+        if (!u) { snprintf(err, errlen, "Unsupported link."); return -1; }
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:u cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                       timeoutInterval:60];
+        [req setValue:[NSString stringWithFormat:@"bytes=%llu-%llu", (unsigned long long)off,
+                                                 (unsigned long long)(off + len - 1)]
+            forHTTPHeaderField:@"Range"];
+        [req setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
+        __block NSData *body = nil;
+        __block NSHTTPURLResponse *resp = nil;
+        __block NSError *error = nil;
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:req
+            completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+                body = d;
+                resp = [r isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)r : nil;
+                error = e;
+                dispatch_semaphore_signal(done);
+            }];
+        [task resume];
+        dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+        if (error || !resp) {
+            snprintf(err, errlen, "Network error: %s", error ? error.localizedDescription.UTF8String : "no response");
+            return 0;
+        }
+        long status = (long)resp.statusCode;
+        if (status == 200) {
+            snprintf(err, errlen, "This link does not lead to an IPA file the app can read in parts (the server sent the whole file).");
+            return -1;
+        }
+        if (status != 206) {
+            snprintf(err, errlen, "The server answered HTTP %ld.", status);
+            return status >= 400 && status < 500 ? -1 : 0;
+        }
+        NSString *cr = [resp valueForHTTPHeaderField:@"Content-Range"];
+        unsigned long long a, b, t;
+        if (!cr || sscanf(cr.UTF8String, "bytes %llu-%llu/%llu", &a, &b, &t) != 3 || a != off || b != off + len - 1) {
+            snprintf(err, errlen, "The server sent the wrong part of the file.");
+            return -1;
+        }
+        if (body.length != len) { snprintf(err, errlen, "Download interrupted."); return 0; }
+        memcpy(dst, body.bytes, len);
+        *total = t;
+        NSString *fin = resp.URL.absoluteString;
+        if (fin && ![fin isEqualToString:u.absoluteString]) snprintf(final_url, final_cap, "%s", fin.UTF8String);
+        return 1;
+    }
+}

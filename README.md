@@ -18,7 +18,7 @@ A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for
 - iOS app built from the same C sources: native Files picker for IPA import, scene-based lifecycle, automatic signing. See [`ios/README.md`](ios/README.md).
 - Headless modes for automated verification (`--autoplay`, `--autoplay-input`, screenshot and script modes).
 
-All 11 bundled songs and all five difficulties (Easy, Normal, Hard, Extreme, Break the Limit) are unlocked. IPAs that carry the DLC packs (the iMazing-style "All DLC Included" package with a `Container/` folder) also give you the 63 DLC songs; see [DLC songs](#dlc-songs).
+All 11 bundled songs and all five difficulties (Easy, Normal, Hard, Extreme, Break the Limit) are unlocked. IPAs that carry the DLC packs (the iMazing-style "All DLC Included" package with a `Container/` folder) also give you the 63 DLC songs, and the DLC page can download single packs out of such an IPA from a link; see [DLC songs](#dlc-songs).
 
 ## Requirements
 
@@ -167,11 +167,15 @@ Both `make -C port setup IPA=…` and the importer (`--import-ipa`, **IMPORT IPA
 
 The title menu's **DLC** button (the original SHOP slot) opens the DLC page: it shows how many packs and songs are installed, has a **SHOW DLC SONGS** ON/OFF switch (saved) that hides or shows them in music select and PV mode. On iOS and Android the page is a native screen of the system's own controls, with an **Import IPA with DLC** row to import a DLC IPA without reinstalling.
 
-High scores of DLC songs are saved by song (the song field of their `rec` lines in `save.txt` is the movie name), so they survive re-imports.
+### Downloading single packs
+
+You don't need the whole 7 GB file. Copy the direct download link of an IPA that includes the DLC packs and tap **PASTE LINK** on the DLC page (or press `Ctrl+V`). The game reads that IPA's pack list over the network (about 1 MB: the zip directory and the original save), then shows the 21 packs with their songs and sizes. Tap a pack to download it: only that pack's files are fetched (230–360 MB each), checked against the archive's CRCs, and its songs show up right away. Tap the pack again while it downloads to cancel. The link is saved for next time.
+
+This works with any link whose server allows partial downloads (HTTP range requests), such as archive.org's download links; a web page about the file (e.g. an archive.org `details/` page) is not enough, the link must lead to the `.ipa` file itself. Nothing is uploaded and no link is built into the game. Downloads use the `curl` tool on Linux/macOS, the system's HTTP stack on Android and iOS. From the command line: `./port/mikuflick --dlc-url URL` lists the packs and `--dlc-get 1,97` (or `all`) installs them into `--app`/`--gamedata`. High scores of DLC songs are saved by song (the song field of their `rec` lines in `save.txt` is the movie name), so they survive re-imports.
 
 ## Not included
 
-The shop (buying DLC), Game Center, Twitter, ads, replays, the collection and PV playlist editing. The DLC servers are long gone; DLC songs come only from an IPA that already contains them (imported with it).
+The shop (buying DLC), Game Center, Twitter, ads, replays, the collection and PV playlist editing. The DLC servers are long gone; DLC songs come only from an IPA that already contains them (imported whole, or single packs downloaded from it).
 
 ## Testing aids
 
