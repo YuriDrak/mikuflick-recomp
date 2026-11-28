@@ -20,7 +20,7 @@ You MUST strictly adhere to the following rules at all times during this project
 
 # Project Status
 
-_Last updated: 2026-11-27._
+_Last updated: 2026-11-28._
 
 ## Overview
 
@@ -56,7 +56,8 @@ The repository ships **no SEGA/Crypton game data**. A user-supplied, decrypted I
 - Played by hand on the phone by the user (2026-11-24) after the touch-area and screen-fill fixes.
 - In-app importer (`--import-ipa` on Linux, same code as Android): 175 files byte-identical to `unzip`, `gamedata.txt` identical to `mfextract`, ~7 s; bad/truncated files refused cleanly. Device test of the Android IMPORT IPA flow is pending (to be done by the user).
 
-- DLC (2026-11-27, macOS build): full DLC IPA (md5 matches archive.org) imports 63 DLC songs in 32 s; per-pack downloads from the archive.org link: pack list in ~2.6 s, pack 1 in 70 s, pack 97 (zip64 offsets) works, re-install skips present files, cancel leaves no `.part` files; downloaded packs give `dlc` lines identical to the full import; DLC page installs reload the song list live; autoplay Extreme all-COOL on DLC songs from packs 1, 96, 97, 99. iOS simulator: native DLC page lists packs and downloaded the Summer Pack through `ios_http_range`. After the move onto upstream main: magnet Extreme still 115,616 (both autoplay modes), カンタレラ records saved by movie, greyed packs and the two-title rows checked on the SDL page and the iOS simulator. Not yet built/tested: Android download path (Java `httpRange`, INTERNET permission), `make setup` with the DLC IPA.
+- DLC (2026-11-27, macOS build): full DLC IPA (md5 matches archive.org) imports 63 DLC songs in 32 s; per-pack downloads from the archive.org link: pack list in ~2.6 s, pack 1 in 70 s, pack 97 (zip64 offsets) works, re-install skips present files, cancel leaves no `.part` files; downloaded packs give `dlc` lines identical to the full import; DLC page installs reload the song list live; autoplay Extreme all-COOL on DLC songs from packs 1, 96, 97, 99. iOS simulator: native DLC page lists packs and downloaded the Summer Pack through `ios_http_range`. After the move onto upstream main: magnet Extreme still 115,616 (both autoplay modes), カンタレラ records saved by movie, greyed packs and the two-title rows checked on the SDL page and the iOS simulator.
+- DLC (2026-11-28): Android download path on a Galaxy S24: pack list, pack download with progress, cancel (the files it finished are removed again: folder unchanged), custom link with Restore Default Link, all from the archive.org link. iOS simulator: custom link and Restore Default Link (fixed a UITableView row-count crash), a server answering 200 to Range is refused at the response, HTTP 404 shown. Desktop: cancel leaves the folder unchanged, RECORDS shows DLC art, magnet Extreme still 115,616. Known: on desktop, after a cancelled download Ctrl+C / SIGTERM no longer quits (the main thread ends up with SDL's thread signal mask; window close still works). Not yet tested: `make setup` with the DLC IPA.
 
 **Not yet measured:** audio output latency across devices (PipeWire/Pulse; OpenSL ES on phones), long sessions, phones other than the A059P. Software-renderer timing is frame-rate sensitive.
 
