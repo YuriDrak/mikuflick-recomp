@@ -197,8 +197,22 @@ static int http_range(Net *n, const char *url, uint64_t off, size_t len, uint8_t
     posix_spawn_file_actions_adddup2(&fa, pfd[1], 1);
     posix_spawn_file_actions_addclose(&fa, pfd[0]);
     posix_spawn_file_actions_addclose(&fa, pfd[1]);
+    /* the worker is an SDL thread, which blocks SIGTERM and friends; curl must not inherit that, or the
+       SIGTERM of a cancel does nothing */
+    posix_spawnattr_t sa;
+    posix_spawnattr_init(&sa);
+    sigset_t none, dfl;
+    sigemptyset(&none);
+    sigemptyset(&dfl);
+    sigaddset(&dfl, SIGTERM);
+    sigaddset(&dfl, SIGINT);
+    sigaddset(&dfl, SIGPIPE);
+    posix_spawnattr_setsigmask(&sa, &none);
+    posix_spawnattr_setsigdefault(&sa, &dfl);
+    posix_spawnattr_setflags(&sa, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
     pid_t pid;
-    int se = posix_spawnp(&pid, "curl", &fa, NULL, argv, environ);
+    int se = posix_spawnp(&pid, "curl", &fa, &sa, argv, environ);
+    posix_spawnattr_destroy(&sa);
     posix_spawn_file_actions_destroy(&fa);
     close(pfd[1]);
     if (se != 0) {
