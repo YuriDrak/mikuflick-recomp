@@ -45,6 +45,22 @@ int dlc_write_songs(const uint8_t *save, size_t len, DlcHaveFile have, void *ud,
    "Container/Library/InstallData/Mov_<n>/<name>.{usm,adx,png}". Returns <name> or NULL. */
 const char *dlc_pack_file(const char *zip_path);
 
+/* <n> of "Container/Library/InstallData/Mov_<n>/...", or -1 */
+int dlc_pack_id(const char *zip_path);
+
+/* A Latin-script name for a song title, for players who don't read Japanese: its English title
+   (dlc_known_songs, by movie name), else the movie name the game itself uses, spaced and
+   capitalised ("mikumiku_ni_siteyannyo" -> "Mikumiku ni Siteyannyo"). "" when the title is in
+   Latin script already. */
+void dlc_song_latin(const char *movie, const char *title, char *out, size_t cap);
+
+/* The DLC packs the game offered (titles only), in pack order; en = English title or NULL */
+typedef struct {
+    int pack;
+    const char *pack_name, *movie, *title, *en;
+} DlcKnownSong;
+const DlcKnownSong *dlc_known_songs(int *n);
+
 #define DLC_SAVE_PATH "Container/Documents/MikuFlick2.dat"
 
 #endif

@@ -20,7 +20,7 @@ all: mikuflick
 mikuflick: $(OBJ)
 	$(CC) -o $@ $(OBJ) $(LDLIBS)
 
-build/%.o: src/%.c src/mf.h src/bplist.h src/dlc.h third_party/pl_mpeg.h | build
+build/%.o: src/%.c src/mf.h src/bplist.h src/dlc.h src/dlcdl.h third_party/pl_mpeg.h | build
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 build:

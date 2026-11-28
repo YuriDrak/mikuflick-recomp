@@ -18,6 +18,8 @@ Without `unzip`, the game can import the IPA itself: `./port/mikuflick --import-
 
 **Updating an existing install:** rerun `make -C port setup` (or re-import the IPA) once. `gamedata.txt` now also carries the ending credits read from the binary; with an older file the game still runs but hides the ENDING button on OPTIONS → CREDITS (and logs a hint). An older in-app import also lacks the `Localizable.strings` files that the help pages and option subtitles are read from.
 
+Single DLC packs can be downloaded out of an IPA that includes them, without fetching all 7 GB: `./port/mikuflick --dlc-url URL` lists the packs, `--dlc-url URL --dlc-get 1,2,97` (or `all`) installs them into the folders given by `--app`/`--gamedata` (`src/net.c` range requests through the `curl` tool, `src/ipa.c` `dlc_catalog_*`). The DLC page does the same from its link field (`src/dlcdl.c`), which starts with the built-in archive.org link (`DLC_DEFAULT_URL`, `src/dlcdl.h`).
+
 ## Run (from the project root)
 
 ```sh
@@ -55,7 +57,7 @@ Menus (on a touchscreen a tap works wherever a click does; the first finger driv
 | CREDITS | ENDING (bottom right) plays the credits roll (about 110 s, not skippable, as in the original) and returns here | `Enter` |
 | RESULTS | RECORDS; LEADERBOARD / ACHIEVEMENTS only show that Game Center is not available; Back | `Up`/`Down` + `Enter`, `Esc` back |
 | RECORDS | swipe sideways or use the side arrows for the song, the arrows by the title for the difficulty, the FLICK RESULT button for the per-key page | `Left`/`Right` song, `Up`/`Down` difficulty, `Space`/`Tab` page, `Enter` next board on the flick page, `Esc` back |
-| DLC page (port) | SHOW DLC SONGS ON/OFF and the installed counts (iOS and Android show native screens instead, with an Import IPA with DLC row) | `Left`/`Right` toggle, `Enter`, `Esc` back |
+| DLC page (port) | SHOW DLC SONGS ON/OFF; the pack list of the built-in archive.org link (click the link field or press `Ctrl+V` to enter another; RESTORE DEFAULT LINK brings the built-in one back), then tap a pack to download it (again to cancel); `<`/`>` page the pack list (iOS and Android show native screens instead) | `Left`/`Right` toggle or page, `Ctrl+V` paste a link (in the field: type, `Enter` keep, `Esc` cancel), `Up`/`Down` + `Enter`, `Esc` back |
 
 The Android build is described in `../android/README.md`. The iOS build is described in `../ios/README.md`.
 
@@ -73,7 +75,7 @@ Menu and result text uses **M+ 1p Bold** (`port/fonts/MPLUS1p-Bold.ttf`, SIL Ope
 
 ## Not included (see ../docs/linux_port_plan.md §6)
 
-The shop (buying DLC), Twitter, Game Center, ads, replays, the collection and PV playlist editing. All songs and difficulties are unlocked, including DLC songs imported from an IPA that contains them.
+The shop (buying DLC), Twitter, Game Center, ads, replays, the collection and PV playlist editing. All songs and difficulties are unlocked, including DLC songs imported or downloaded from an IPA that contains them.
 
 ## Testing aids
 

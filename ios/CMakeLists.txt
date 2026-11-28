@@ -46,7 +46,7 @@ target_compile_options(MikuFlick PRIVATE -Wall -Wextra -Wno-unused-parameter)   
 set_source_files_properties("${port}/src/pl_mpeg_impl.c" PROPERTIES COMPILE_OPTIONS -Wno-shorten-64-to-32)   # vendored
 target_compile_definitions(MikuFlick PRIVATE MF_IOS)
 set_source_files_properties(App/Platform.m App/ImportViewController.m App/DlcViewController.m App/Scene.m PROPERTIES COMPILE_FLAGS "-fobjc-arc")
-target_include_directories(MikuFlick PRIVATE App "${port}/third_party")
+target_include_directories(MikuFlick PRIVATE App "${port}/third_party" "${port}/src")
 target_link_libraries(MikuFlick PRIVATE SDL2_image::SDL2_image-static
     SDL2_ttf::SDL2_ttf-static SDL2::SDL2-static "-framework UniformTypeIdentifiers")
 set(MF_BUNDLE_ID "io.github.tehcnological.mikuflick" CACHE STRING "iOS bundle identifier")

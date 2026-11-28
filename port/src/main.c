@@ -350,8 +350,7 @@ static void cli_progress(void *ud, double frac, const char *file) {
     if (frac >= 1.0) fputc('\n', stderr);
 }
 
-/* ---------------- song list changes (imports from the DLC page) ---------------- */
-#if defined(__ANDROID__) || defined(MF_IOS)
+/* ---------------- song list changes (DLC installs and imports) ---------------- */
 typedef struct {
     GameData *gd;
     SaveData *save;
@@ -372,6 +371,19 @@ static void songs_changed(SongCtx *c) {
     *c->song = 0;
 }
 
+/* a DLC pack finished downloading (dlcdl.c): load the new song list (kept as is if it is broken) */
+static void dlc_reload(SongCtx *c) {
+    static GameData gd_new;
+    if (!gamedata_load(&gd_new, c->gamedata)) {
+        log_msg("dlc: the new song list could not be loaded, keeping the old one");
+        return;
+    }
+    save_write(c->save);
+    *c->gd = gd_new;
+    songs_changed(c);
+}
+
+#if defined(__ANDROID__) || defined(MF_IOS)
 /* DLC page: import a whole IPA with DLC. False if the player quit (broken data, import refused). */
 static bool dlc_import(SDL_Renderer *ren, const char *files_dir, const char *appdir, SongCtx *c) {
     save_write(c->save);
@@ -381,17 +393,123 @@ static bool dlc_import(SDL_Renderer *ren, const char *files_dir, const char *app
     songs_changed(c);
     return true;
 }
+#endif
 
-/* installed DLC: packs and songs */
-static void dlc_counts(const SongCtx *c, int *packs, int *songs) {
+#ifdef MF_IOS
+/* native DLC page (ios/App/DlcViewController.m) */
+static int ios_pack_songs(void *ud, int pack) {
+    const SongCtx *c = ud;
     int n = 0;
+    for (int i = c->gd->nbase; i < c->gd->nsongs; i++) n += c->gd->songs[i].pack == pack;
+    return n;
+}
+
+static void ios_dlc_tick(IosDlcPage *p) {
+    SongCtx *c = p->ud;
+    if (dlcdl_take_changed()) dlc_reload(c);
+    int packs = 0;
     for (int i = c->gd->nbase; i < c->gd->nsongs; i++) {
         bool seen = false;
         for (int k = c->gd->nbase; k < i && !seen; k++) seen = c->gd->songs[k].pack == c->gd->songs[i].pack;
-        n += !seen;
+        packs += !seen;
     }
-    *packs = n;
-    *songs = c->gd->nsongs - c->gd->nbase;
+    p->installed_packs = packs;
+    p->installed_songs = c->gd->nsongs - c->gd->nbase;
+    bool dirty = false;
+    if (p->show_dlc != c->opt->show_dlc) {
+        c->opt->show_dlc = p->show_dlc;
+        c->save->opt = *c->opt;
+        c->save->has_opt = true;
+        dirty = true;
+    }
+    if (strcmp(p->url, c->save->dlc_url)) {
+        snprintf(c->save->dlc_url, sizeof c->save->dlc_url, "%s", p->url);
+        dirty = true;
+    }
+    if (dirty) save_write(c->save);
+}
+
+/* true: the player asked to import a whole IPA with DLC */
+static bool ios_dlc_page(SDL_Window *win, SongCtx *c) {
+    IosDlcPage p = {.ud = c, .show_dlc = c->opt->show_dlc, .pack_songs = ios_pack_songs, .tick = ios_dlc_tick};
+    snprintf(p.url, sizeof p.url, "%s", c->save->dlc_url);
+    ios_dlc_tick(&p);
+    return ios_dlc_screen(win, &p);
+}
+#endif
+
+#ifdef __ANDROID__
+/* Native DLC page (android/.../DlcPage.java, through android.c), the counterpart of the iOS one: the
+   page shows the state below and sends the player's actions; the work runs here on the SDL thread.
+   State: one line per record, fields separated by tabs (tabs and line breaks in text become spaces):
+     S  state permille busy_pack error msg show_dlc installed_packs installed_songs url
+     P  pack name nsongs megabytes available installed title latin [title latin ...]   (one per pack)
+   Actions: later, import, show 0|1, url LINK, list, install PACK, cancel. */
+typedef struct { char *p; size_t len, cap; } StateBuf;
+
+static void sb_raw(StateBuf *b, const char *s) {
+    for (; *s && b->len + 1 < b->cap; s++) b->p[b->len++] = *s;
+    b->p[b->len] = 0;
+}
+
+static void sb_text(StateBuf *b, const char *s) {
+    sb_raw(b, "\t");
+    for (; s && *s && b->len + 1 < b->cap; s++) b->p[b->len++] = (*s == '\t' || *s == '\n' || *s == '\r') ? ' ' : *s;
+    b->p[b->len] = 0;
+}
+
+static void sb_int(StateBuf *b, long long v) {
+    char n[32];
+    snprintf(n, sizeof n, "\t%lld", v);
+    sb_raw(b, n);
+}
+
+static int pack_installed_songs(const SongCtx *c, int pack) {
+    int n = 0;
+    for (int i = c->gd->nbase; i < c->gd->nsongs; i++) n += c->gd->songs[i].pack == pack;
+    return n;
+}
+
+static size_t dlc_page_state(const SongCtx *c, const DlcDlStatus *st, char *buf, size_t cap) {
+    StateBuf b = {buf, 0, cap};
+    buf[0] = 0;
+    int packs = 0;
+    for (int i = c->gd->nbase; i < c->gd->nsongs; i++) {
+        bool seen = false;
+        for (int k = c->gd->nbase; k < i && !seen; k++) seen = c->gd->songs[k].pack == c->gd->songs[i].pack;
+        packs += !seen;
+    }
+    double f = st->frac < 0 ? 0 : st->frac > 1 ? 1 : st->frac;
+    sb_raw(&b, "S");
+    sb_int(&b, st->state);
+    sb_int(&b, (long long)(f * 1000.0));
+    sb_int(&b, st->busy_pack);
+    sb_int(&b, st->error);
+    sb_text(&b, st->msg);
+    sb_int(&b, c->opt->show_dlc);
+    sb_int(&b, packs);
+    sb_int(&b, c->gd->nsongs - c->gd->nbase);
+    sb_text(&b, c->save->dlc_url);
+    sb_text(&b, DLC_DEFAULT_URL);   /* DlcPage: Restore Default Link */
+    sb_raw(&b, "\n");
+    for (int i = 0; i < st->npacks; i++) {
+        const DlcPackInfo *p = &st->packs[i];
+        size_t start = b.len;
+        sb_raw(&b, "P");
+        sb_int(&b, p->pack);
+        sb_text(&b, p->name);
+        sb_int(&b, p->nsongs);
+        sb_int(&b, (long long)((p->bytes + (1u << 19)) >> 20));
+        sb_int(&b, p->available);
+        sb_int(&b, pack_installed_songs(c, p->pack) >= p->nsongs);
+        for (int k = 0; k < p->nsongs && k < DLC_PACK_SONGS; k++) {
+            sb_text(&b, p->songs[k].title);
+            sb_text(&b, p->songs[k].latin);
+        }
+        sb_raw(&b, "\n");
+        if (b.len + 1 >= b.cap) { b.len = start; buf[start] = 0; break; }   /* whole lines only */
+    }
+    return b.len;
 }
 
 static void dlc_set_show(SongCtx *c, bool on) {
@@ -402,44 +520,21 @@ static void dlc_set_show(SongCtx *c, bool on) {
     c->save->has_opt = true;
     save_write(c->save);
 }
-#endif
-
-#ifdef MF_IOS
-/* native DLC page (ios/App/DlcViewController.m) */
-static void ios_dlc_tick(IosDlcPage *p) {
-    SongCtx *c = p->ud;
-    dlc_counts(c, &p->installed_packs, &p->installed_songs);
-    dlc_set_show(c, p->show_dlc);
-}
-
-/* true: the player asked to import a whole IPA with DLC */
-static bool ios_dlc_page(SDL_Window *win, SongCtx *c) {
-    IosDlcPage p = {.ud = c, .show_dlc = c->opt->show_dlc, .tick = ios_dlc_tick};
-    ios_dlc_tick(&p);
-    return ios_dlc_screen(win, &p);
-}
-#endif
-
-#ifdef __ANDROID__
-/* Native DLC page (android/.../DlcPage.java, through android.c), the counterpart of the iOS one: the
-   page shows the state below and sends the player's actions; the work runs here on the SDL thread.
-   State: "S <show_dlc> <installed_packs> <installed_songs>", fields separated by tabs.
-   Actions: later, import, show 0|1. */
-static size_t dlc_page_state(const SongCtx *c, char *buf, size_t cap) {
-    int packs, songs;
-    dlc_counts(c, &packs, &songs);
-    int n = snprintf(buf, cap, "S\t%d\t%d\t%d\n", c->opt->show_dlc, packs, songs);
-    return n < 0 ? 0 : (size_t)n < cap ? (size_t)n : cap - 1;
-}
 
 /* true: the player asked to import a whole IPA with DLC */
 static bool android_dlc_page(SongCtx *c) {
-    char state[64], sent[64] = "";
+    static char state[128 * 1024], sent[128 * 1024];
+    static DlcDlStatus st;   /* ~80 KB: not on the SDL thread's stack */
+    size_t sent_len = (size_t)-1;
+    Uint32 sent_ms = 0;
+    int sent_state = -1;
     bool import = false;
     if (!android_page_show(ANDROID_PAGE_DLC, 0, NULL)) {
         log_msg("dlc: the DLC page could not be shown");
         return false;
     }
+    dlcdl_status(&st);
+    if (st.state == DLD_IDLE && c->save->dlc_url[0]) dlcdl_list(c->save->dlc_url);   /* pack list of the saved link */
     for (;;) {
         SDL_Event e;
         bool quit = false;
@@ -450,18 +545,43 @@ static bool android_dlc_page(SongCtx *c) {
             SDL_PushEvent(&q);
             break;
         }
-        char act[64];
+        dlcdl_status(&st);
+        char act[640];
         bool done = false;
         while (!done && android_page_action(act, sizeof act)) {
+            bool busy = st.state == DLD_LISTING || st.state == DLD_INSTALLING;
             if (!strcmp(act, "later")) done = true;
-            else if (!strcmp(act, "import")) import = done = true;
-            else if (!strncmp(act, "show ", 5)) dlc_set_show(c, act[5] == '1');
+            else if (!strcmp(act, "import")) {   /* the importer replaces the folder packs are written to */
+                if (!busy) import = done = true;
+            } else if (!strncmp(act, "show ", 5)) dlc_set_show(c, act[5] == '1');
+            else if (!strncmp(act, "url ", 4)) {
+                const char *url = act + 4;
+                if (!busy && strlen(url) < sizeof c->save->dlc_url && net_url_ok(url)) {
+                    snprintf(c->save->dlc_url, sizeof c->save->dlc_url, "%s", url);
+                    save_write(c->save);
+                    dlcdl_list(c->save->dlc_url);
+                } else log_msg("dlc: link not taken");
+            } else if (!strcmp(act, "list")) {
+                if (!busy && c->save->dlc_url[0]) dlcdl_list(c->save->dlc_url);
+            } else if (!strncmp(act, "install ", 8)) {
+                if (st.state == DLD_READY) dlcdl_install(atoi(act + 8));
+            } else if (!strcmp(act, "cancel")) dlcdl_cancel();
+            dlcdl_status(&st);
         }
         if (done) break;
-        size_t n = dlc_page_state(c, state, sizeof state);
-        if (strcmp(state, sent)) {   /* only when it changed */
-            android_dlc_state(state, n);
-            snprintf(sent, sizeof sent, "%s", state);
+        if (dlcdl_take_changed()) dlc_reload(c);   /* a pack finished: new song list (counts on the page) */
+        size_t n = dlc_page_state(c, &st, state, sizeof state);
+        Uint32 now = SDL_GetTicks();
+        if (n != sent_len || memcmp(state, sent, n)) {
+            /* while a pack downloads only its percentage changes: 10 updates a second are plenty */
+            bool progress = st.state == DLD_INSTALLING && sent_state == DLD_INSTALLING;
+            if (!progress || now - sent_ms >= 100) {
+                android_dlc_state(state, n);
+                memcpy(sent, state, n);
+                sent_len = n;
+                sent_ms = now;
+                sent_state = st.state;
+            }
         }
         SDL_Delay(16);   /* nothing to draw: the page is on top */
     }
@@ -469,6 +589,49 @@ static bool android_dlc_page(SongCtx *c) {
     return import;
 }
 #endif
+
+/* --dlc-url [--dlc-get]: the DLC page downloader without the UI */
+static int dlc_cli(const char *url, const char *get, const char *appdir, const char *gamedata) {
+    char err[320];
+    ZipSrc *src = net_open(url, NULL, err, sizeof err);
+    if (!src) { fprintf(stderr, "%s\n", err); return 1; }
+    DlcCatalog *cat = dlc_catalog_open(src, err, sizeof err);
+    if (!cat) {
+        const char *ne = net_error(src);
+        fprintf(stderr, "%s%s%s\n", err, ne ? " / " : "", ne ? ne : "");
+        net_close(src);
+        return 1;
+    }
+    static DlcPackInfo packs[DLC_MAX_PACKS];
+    int np = dlc_catalog_packs(cat, packs, DLC_MAX_PACKS), rc = 0;
+    for (int i = 0; i < np; i++) {
+        printf("pack %3d  %-20s %2d songs %5llu MB\n", packs[i].pack, packs[i].name, packs[i].nsongs,
+               (unsigned long long)(packs[i].bytes >> 20));
+        for (int k = 0; k < packs[i].nsongs && k < DLC_PACK_SONGS; k++) {
+            const DlcPackSong *s = &packs[i].songs[k];
+            if (s->latin[0]) printf("            %s (%s)\n", s->latin, s->title);
+            else printf("            %s\n", s->title);
+        }
+    }
+    for (const char *s = get; s && *s && !rc;) {
+        bool all = !strncmp(s, "all", 3);
+        int want = all ? -1 : atoi(s);
+        for (int i = 0; i < np && !rc; i++) {
+            if (!all && packs[i].pack != want) continue;
+            fprintf(stderr, "pack %d (%s):\n", packs[i].pack, packs[i].name);
+            if (!dlc_catalog_install(cat, packs[i].pack, appdir, gamedata, cli_progress, NULL, NULL, err, sizeof err)) {
+                const char *ne = net_error(src);
+                fprintf(stderr, "\ninstall failed: %s%s%s\n", err, ne ? " / " : "", ne ? ne : "");
+                rc = 1;
+            }
+        }
+        s = strchr(s, ',');
+        if (s) s++;
+    }
+    dlc_catalog_free(cat);
+    net_close(src);
+    return rc;
+}
 
 static void usage(void) {
     puts("mikuflick - Linux port of Miku Flick/02 (requires your own extracted IPA)\n"
@@ -483,6 +646,8 @@ static void usage(void) {
          "  --exit-after-song  print the result and exit after one song\n"
          "  --font PATH        TrueType font for menus (default: port/fonts/MPLUS1p-Bold.ttf; none = bitmap)\n"
          "  --import-ipa FILE  extract your IPA into --import-to DIR (default imported/) and exit\n"
+         "  --dlc-url URL      list the DLC packs of the IPA at URL (needs curl and range requests)\n"
+         "  --dlc-get LIST     with --dlc-url: install packs (e.g. 1,2,97 or all) into --app/--gamedata, exit\n"
          "  --fullscreen       start fullscreen (F11 toggles)   --window WxH  window size");
 }
 
@@ -498,6 +663,7 @@ int main(int argc, char **argv) {
     const char *shot_dir = NULL;      /* testing: PNG captures */
     const char *font_path = NULL;     /* --font PATH, or "none" for the bitmap font */
     const char *import_ipa = NULL, *import_to = "imported";   /* --import-ipa: in-app importer from the CLI */
+    const char *dlc_url = NULL, *dlc_get = NULL;              /* --dlc-url / --dlc-get: DLC page downloader from the CLI */
     double shot_times[16];
     int nshots = 0, next_shot = 0, start_scene = SCENE_BOOT, ui_shot_scene = -1;
     double ui_shot_times[32];
@@ -557,6 +723,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--font") && v) { font_path = v; i++; }
         else if (!strcmp(a, "--import-ipa") && v) { import_ipa = v; i++; }
         else if (!strcmp(a, "--import-to") && v) { import_to = v; i++; }
+        else if (!strcmp(a, "--dlc-url") && v) { dlc_url = v; i++; }
+        else if (!strcmp(a, "--dlc-get") && v) { dlc_get = v; i++; }
         else if (!strcmp(a, "--shot-ui-times") && v) {
             for (char *s = (char *)v; *s && nuishots < 32;) {
                 ui_shot_times[nuishots++] = strtod(s, &s);
@@ -621,6 +789,7 @@ int main(int argc, char **argv) {
                import_to);
         return 0;
     }
+    if (dlc_url) return dlc_cli(dlc_url, dlc_get, appdir, gamedata);
     if (!datadir[0]) {
         const char *x = getenv("XDG_DATA_HOME"), *h = getenv("HOME");
         if (x && *x) snprintf(datadir, sizeof datadir, "%s/mikuflick-port", x);
@@ -694,6 +863,7 @@ int main(int argc, char **argv) {
     }
     static SaveData save;
     save_load(&save, datadir, &gd);
+    dlcdl_init(appdir, gamedata);
     if (save.has_opt) {   /* options saved from the OPTIONS screen; command-line flags win */
         if (!cli_bgm) opt.bgm_volume = save.opt.bgm_volume;
         if (!cli_se) opt.se_volume = save.opt.se_volume;
@@ -714,9 +884,7 @@ int main(int argc, char **argv) {
 
     int scene = SCENE_BOOT, song = 0, diff = 1;
     int first_next = -1;   /* scene to switch to on the first frame */
-#if MF_NATIVE_DLC
     SongCtx songs = {&gd, &save, ui, &opt, &song, datadir, gamedata};
-#endif
     if (opt.start_song >= 0) { scene = SCENE_GAME; song = opt.start_song; diff = opt.start_diff; }
     else if (start_scene == SCENE_RESULT) { /* testing: sample result screen */
         GameResult demo = {.song = 6, .diff = 1, .counts = {0, 0, 1, 0, 26, 56}, .total_notes = 83, .max_combo = 62,
@@ -900,6 +1068,10 @@ int main(int argc, char **argv) {
             if (n >= 0) next = n;
         }
 
+        /* a DLC pack finished downloading (dlcdl.c): new song list, outside play and the song lists */
+        if (next < 0 && !tr.on && (scene == SCENE_OPTION || scene == SCENE_DLC || scene == SCENE_TITLE) && dlcdl_take_changed())
+            dlc_reload(&songs);
+
 #if MF_NATIVE_DLC
         while (next == SCENE_DLC) {   /* native DLC page; its IMPORT comes back to it */
 #ifdef MF_IOS
@@ -961,6 +1133,7 @@ int main(int argc, char **argv) {
     if (game) game_destroy(game);
     ending_destroy(ending);
     records_destroy(records);   /* RECORDS */
+    dlcdl_quit();
     ui_destroy(ui);
     view_quit();
     text_quit();

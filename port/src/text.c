@@ -181,6 +181,13 @@ void font_draw_plain_fit(SDL_Renderer *ren, const char *text, float x, float y, 
     SDL_RenderCopyF(ren, e->tex, NULL, &d);
 }
 
+/* width font_draw_plain draws text with (col: the colour it is drawn in, so the texture is cached once) */
+float font_plain_width(SDL_Renderer *ren, const char *text, float scale, SDL_Color col) {
+    Entry *e = T.ok && text[0] ? lookup(ren, text, (int)(scale * 10.0f + 0.5f), col, false) : NULL;
+    if (!e) return text[0] ? (float)strlen(text) * 6 * scale - scale : 0.0f;   /* bitmap_font_draw */
+    return (float)e->w * (latin_text(text) ? 0.93f : 1.0f);
+}
+
 bool text_has_glyph(Uint32 cp) {
     TTF_Font *f = T.ok ? font_px(28) : NULL;
     return f && TTF_GlyphIsProvided32(f, cp);

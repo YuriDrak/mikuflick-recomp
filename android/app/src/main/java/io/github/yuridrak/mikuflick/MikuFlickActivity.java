@@ -6,8 +6,15 @@ import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.view.KeyEvent;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.libsdl.app.SDLActivity;
 
@@ -22,8 +29,11 @@ import org.libsdl.app.SDLActivity;
  * Game data import (ImportPage): the page opens the system file picker and passes the chosen
  * file's descriptor to the native code ("fd N"), which reads the zip from it (port/src/ipa.c).
  *
- * DLC page (DlcPage): the title SHOP slot; the SHOW DLC SONGS switch, the installed counts and
- * IMPORT IPA (an IPA that includes the DLC packs).
+ * DLC page (DlcPage): the title SHOP slot; shows the pack list and download state of the native
+ * downloader (port/src/dlcdl.c) and sends the player's choices back.
+ *
+ * DLC page downloads: the native code (port/src/net.c) reads single DLC packs out of a
+ * large IPA with HTTP range requests through httpRange() / httpError(), on its worker thread.
  *
  * Command-line flags of the Linux build can be passed for testing:
  *   adb shell am start -n io.github.yuridrak.mikuflick/.MikuFlickActivity --es args "--song 6 --diff 3 --autoplay"
@@ -118,6 +128,101 @@ public class MikuFlickActivity extends SDLActivity {
             Log.w(TAG, "no file picker", e);
             picking = null;
             from.pickerFailed();
+        }
+    }
+
+    private static final Pattern CONTENT_RANGE = Pattern.compile("bytes\\s+(\\d+)-(\\d+)/(\\d+)");
+    private final Object httpLock = new Object();
+    private String httpUrl, httpFinalUrl;   /* last link and where its redirects ended */
+    private volatile String httpErr = "";
+
+    /** Last httpRange() failure; a leading "!" means retrying will not help. */
+    public String httpError() {
+        return httpErr;
+    }
+
+    /**
+     * Called from native code (worker thread): bytes [off, off + len) of url with a range request.
+     * Returns 8 bytes of total file size (big-endian) followed by the data, or null (see httpError).
+     * Redirects are followed by hand (http/https only); the final URL is reused for the same link.
+     */
+    public byte[] httpRange(String url, long off, int len) {
+        String start;
+        synchronized (httpLock) {
+            if (!url.equals(httpUrl)) { httpUrl = url; httpFinalUrl = null; }
+            start = httpFinalUrl != null ? httpFinalUrl : url;
+        }
+        try {
+            byte[] r = fetchRange(url, start, off, len);
+            if (r == null && !start.equals(url) && !httpErr.startsWith("!")) {   /* data server link expired? */
+                synchronized (httpLock) { httpFinalUrl = null; }
+                r = fetchRange(url, url, off, len);
+            }
+            return r;
+        } catch (OutOfMemoryError e) {
+            httpErr = "Out of memory.";
+            return null;
+        }
+    }
+
+    private byte[] fetchRange(String link, String url, long off, int len) {
+        HttpURLConnection c = null;
+        try {
+            for (int hop = 0; hop < 8; hop++) {
+                URL u = new URL(url);
+                String proto = u.getProtocol().toLowerCase(Locale.ROOT);
+                if (!proto.equals("http") && !proto.equals("https")) { httpErr = "!Unsupported link."; return null; }
+                c = (HttpURLConnection) u.openConnection();
+                c.setInstanceFollowRedirects(false);
+                c.setConnectTimeout(20000);
+                c.setReadTimeout(30000);
+                c.setRequestProperty("Range", "bytes=" + off + "-" + (off + len - 1));
+                c.setRequestProperty("Accept-Encoding", "identity");
+                int status = c.getResponseCode();
+                if (status >= 300 && status < 400) {
+                    String loc = c.getHeaderField("Location");
+                    c.disconnect();
+                    c = null;
+                    if (loc == null) { httpErr = "Bad redirect."; return null; }
+                    url = new URL(u, loc).toString();
+                    continue;
+                }
+                if (status == 200) {
+                    httpErr = "!This link does not lead to an IPA file the app can read in parts (the server sent the whole file).";
+                    return null;
+                }
+                if (status != 206) {
+                    httpErr = (status >= 400 && status < 500 ? "!" : "") + "The server answered HTTP " + status + ".";
+                    return null;
+                }
+                Matcher m = CONTENT_RANGE.matcher(String.valueOf(c.getHeaderField("Content-Range")));
+                if (!m.find() || Long.parseLong(m.group(1)) != off || Long.parseLong(m.group(2)) != off + len - 1) {
+                    httpErr = "!The server sent the wrong part of the file.";
+                    return null;
+                }
+                long total = Long.parseLong(m.group(3));
+                byte[] out = new byte[8 + len];
+                for (int i = 0; i < 8; i++) out[i] = (byte) (total >>> (56 - 8 * i));
+                int got = 0;
+                try (InputStream in = c.getInputStream()) {
+                    while (got < len) {
+                        int k = in.read(out, 8 + got, len - got);
+                        if (k < 0) break;
+                        got += k;
+                    }
+                }
+                if (got != len) { httpErr = "Download interrupted."; return null; }
+                synchronized (httpLock) { if (link.equals(httpUrl)) httpFinalUrl = url; }
+                return out;
+            }
+            httpErr = "Too many redirects.";
+            return null;
+        } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "download " + off + "+" + len, e);
+            httpErr = "Network error: " + e.getMessage();
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
         }
     }
 

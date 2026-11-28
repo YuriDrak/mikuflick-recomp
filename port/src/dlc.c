@@ -231,6 +231,15 @@ int dlc_write_songs(const uint8_t *save, size_t len, DlcHaveFile have, void *ud,
     return written;
 }
 
+int dlc_pack_id(const char *zip_path) {
+    static const char pre[] = "Container/Library/InstallData/Mov_";
+    if (strncmp(zip_path, pre, sizeof pre - 1)) return -1;
+    const char *p = zip_path + sizeof pre - 1;
+    int id = 0, digits = 0;
+    while (*p >= '0' && *p <= '9' && digits < 5) { id = id * 10 + (*p++ - '0'); digits++; }
+    return digits && *p == '/' ? id : -1;
+}
+
 const char *dlc_pack_file(const char *zip_path) {
     static const char pre[] = "Container/Library/InstallData/Mov_";
     if (strncmp(zip_path, pre, sizeof pre - 1)) return NULL;
@@ -241,4 +250,108 @@ const char *dlc_pack_file(const char *zip_path) {
     const char *dot = strrchr(p, '.');
     if (!dot || (strcasecmp(dot, ".usm") && strcasecmp(dot, ".adx") && strcasecmp(dot, ".png"))) return NULL;
     return p;
+}
+
+/* Every DLC pack and song the game offered (as the "All DLC Included" IPA's save lists them: pack,
+   pack name, movie, title), with the English name VocaDB (vocadb.net) lists for each original song
+   that has a Japanese title, checked against the game's artist. Titles only, no game data: the DLC
+   page shows these packs greyed out when no link offers them. */
+static const DlcKnownSong k_known[] = {
+    {1, "Duet Pack", "kantarera", "カンタレラ", "Cantarella"},
+    {1, "Duet Pack", "gemini", "ジェミニ", "Gemini"},
+    {1, "Duet Pack", "colorful_sexy", "カラフル×セクシィ", "Colorful×Sexy"},
+    {2, "DIVA Pack", "kotti_muite_baby", "こっち向いて Baby", "Look this Way, Baby"},
+    {2, "DIVA Pack", "Yellow", "Yellow", NULL},
+    {2, "DIVA Pack", "colorful_melody", "カラフル×メロディ", "Colorful×Melody"},
+    {3, "Summer Pack", "dear_cocoa_girls", "Dear cocoa girls", NULL},
+    {3, "Summer Pack", "iyaiya_seijin", "イヤイヤ星人", "No-No Alien"},
+    {3, "Summer Pack", "soiyassa", "そいやっさぁ!!", "Soiyassaa!!"},
+    {4, "Dance Pack", "mikumiku_ni_siteyannyo", "みくみくにしてあげる♪【してやんよ】", "I'll Make You Do the Miku Miku♪ (You'll Do It)"},
+    {4, "Dance Pack", "lukaluka_nightfever", "ルカルカ★ナイトフィーバー", "Luka Luka★Night Fever"},
+    {4, "Dance Pack", "nightmare_partynight", "ナイトメア☆パーティーナイト", "Nightmare☆Party Night"},
+    {5, "Tear Pack", "kokoro", "ココロ", "Heart"},
+    {5, "Tear Pack", "VOiCE", "VOiCE -DIVA MIX-", NULL},
+    {5, "Tear Pack", "hinekuremono", "ひねくれ者", "The Rebel"},
+    {6, "Autumn Pack", "tsugaikogarashi", "番凩", "Pair of Wintry Winds"},
+    {6, "Autumn Pack", "kyodai_syoujyo", "巨大少女", "Gigantic Girl"},
+    {6, "Autumn Pack", "rinrin_signal", "リンリンシグナル", "Rin Rin Signal"},
+    {7, "Guitar Pack", "puzzle", "パズル", "Puzzle"},
+    {7, "Guitar Pack", "meiteki_cybernetics", "迷的サイバネティックス", "Depression of Cybernetics"},
+    {7, "Guitar Pack", "sekiranunn_graffiti", "積乱雲グラフィティ", "Cumulonimbus Graffiti"},
+    {8, "Dark Pack", "musunde_hiraite_rasetsuto_mukuro", "結んで開いて羅刹と骸", "Close and Open, Demons and the Dead"},
+    {8, "Dark Pack", "houkai_utahime", "崩壊歌姫", "Disruptive Diva"},
+    {8, "Dark Pack", "saa_dotti", "さあ、どっち？", "Now, Which?"},
+    {9, "Winter Pack", "kogane_no_seiya_sousetsu_ni_kuchite", "金の聖夜霜雪に朽ちて", "Requiem for the Phantasma [25,Dec]"},
+    {9, "Winter Pack", "hajimeteno_koiga_owarutoki", "初めての恋が終わる時", "When First Love Ends"},
+    {9, "Winter Pack", "strobo_nights", "ストロボナイツ", "Strobo Nights"},
+    {10, "Japan Pack", "jugemu_sequencer", "ジュゲムシーケンサー", "Jugemu Sequencer"},
+    {10, "Japan Pack", "iroha_uta", "いろは唄", "Iroha Song"},
+    {10, "Japan Pack", "amata_no_mai", "数多の舞 -Dance of many-", "Dance of Many"},
+    {11, "Star Pack", "double_lariat", "ダブルラリアット", "Double Lariat"},
+    {11, "Star Pack", "hello_planet", "＊ハロー、プラネット。", "*Hello, Planet."},
+    {11, "Star Pack", "from_y_to_y", "from Y to Y", NULL},
+    {12, "Lovely Pack", "mikumiku_kinn_ni_gotyuui", "みくみく菌にご注意♪", "Beware of the Miku Miku Germs♪"},
+    {12, "Lovely Pack", "koiiro_byoutou", "恋色病棟", "Love-Colored Ward"},
+    {12, "Lovely Pack", "nekomimi_switch", "ねこみみスイッチ", "Cat Ears Switch"},
+    {13, "Farewell Pack", "hontoha_wakatteru", "ほんとは分かってる", "I Understand The Truth"},
+    {13, "Farewell Pack", "utani_katachiha_naikeredo", "歌に形はないけれど", "Though My Song Has No Form"},
+    {13, "Farewell Pack", "spica", "SPiCa", NULL},
+    {14, "Anniversary Pack", "yumeyume", "ゆめゆめ", "DREAM DREAM"},
+    {14, "Anniversary Pack", "innocence", "Innocence", NULL},
+    {14, "Anniversary Pack", "worlds_end_dancehall", "ﾜｰﾙｽﾞｴﾝﾄﾞ･ﾀﾞﾝｽﾎｰﾙ", "World's End Dancehall"},
+    {15, "mirai Pack", "on_the_rocks", "on the rocks", NULL},
+    {15, "mirai Pack", "no_logic", "No Logic", NULL},
+    {15, "mirai Pack", "mousou_sketch", "妄想スケッチ", "Delusion Sketch"},
+    {16, "Thankyou Pack", "the_secretgarden", "The Secret garden", NULL},
+    {16, "Thankyou Pack", "39", "39", NULL},
+    {16, "Thankyou Pack", "sono_itibyou_suro-moshon", "その一秒スローモーション", "That One Second in Slow Motion"},
+    {17, "Rock Pack", "kodokunohate", "孤独の果て -extend edition-", "End of Solitude -extend edition-"},
+    {17, "Rock Pack", "rolling_girl", "ローリンガール", "Rollin' Girl"},
+    {17, "Rock Pack", "toumei_suisai", "透明水彩", "Transparent Watercolors"},
+    {96, "MikuFlick Pack 4", "popipo", "ぽっぴっぽー", "PoPiPo"},
+    {96, "MikuFlick Pack 4", "koi_suru_vocaloid", "恋スルVOC@LOID", "VOC@LOID in Love"},
+    {96, "MikuFlick Pack 4", "hatsunemiku_no_syoushitsu", "初音ミクの消失", "The Disappearance of Hatsune Miku"},
+    {97, "MikuFlick Pack 2", "melt", "メルト", "Melt"},
+    {97, "MikuFlick Pack 2", "stargazer", "StargazeR", NULL},
+    {97, "MikuFlick Pack 2", "moon", "moon", NULL},
+    {98, "MikuFlick Pack 3", "world_is_mine", "ワールドイズマイン", "World is Mine"},
+    {98, "MikuFlick Pack 3", "anata_no_utahime", "あなたの歌姫", "Your Diva"},
+    {98, "MikuFlick Pack 3", "timelimit", "タイムリミット", "Time Limit"},
+    {99, "MikuFlick Pack 1", "romio_to_cinderella", "ロミオとシンデレラ", "Romeo and Cinderella"},
+    {99, "MikuFlick Pack 1", "electric_angew", "えれくとりっく・えんじぇぅ", "Electric Angel"},
+    {99, "MikuFlick Pack 1", "finder", "ファインダー(DSLR remix - re:edit)", "Finder (DSLR remix - re:edit)"},
+};
+
+const DlcKnownSong *dlc_known_songs(int *n) {
+    *n = (int)(sizeof k_known / sizeof *k_known);
+    return k_known;
+}
+
+void dlc_song_latin(const char *movie, const char *title, char *out, size_t cap) {
+    static const char *particles[] = {"no", "ni", "wa", "ga", "wo", "to", "de", "he", "mo"};
+    if (!cap) return;
+    out[0] = 0;
+    bool latin = true;
+    for (const unsigned char *p = (const unsigned char *)title; *p && latin; p++) latin = *p < 0x80;
+    if (latin || !movie[0]) return;
+    for (size_t i = 0; i < sizeof k_known / sizeof *k_known; i++)
+        if (k_known[i].en && !strcmp(k_known[i].movie, movie)) { snprintf(out, cap, "%s", k_known[i].en); return; }
+    size_t n = 0;
+    const char *p = movie;
+    while (*p && n + 1 < cap) {
+        while (*p == '_') p++;
+        size_t len = strcspn(p, "_");
+        if (!len) break;
+        if (n && n + 1 < cap) out[n++] = ' ';
+        bool small = false;
+        for (size_t k = 0; n && k < sizeof particles / sizeof *particles; k++)
+            small |= strlen(particles[k]) == len && !strncmp(p, particles[k], len);
+        for (size_t k = 0; k < len && n + 1 < cap; k++) {
+            char ch = p[k];
+            if (k == 0 && !small && ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+            out[n++] = ch;
+        }
+        p += len;
+    }
+    out[n] = 0;
 }
