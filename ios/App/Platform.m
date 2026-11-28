@@ -101,6 +101,41 @@ bool ios_dlc_screen(SDL_Window *window, IosDlcPage *page) {
     return import;
 }
 
+/* One range request: the body goes straight into dst. Anything but 206 is stopped at the response
+   (a server that ignores Range would otherwise send the whole multi-GB IPA), and so is a body
+   longer than the range. */
+@interface MFRangeTask : NSObject <NSURLSessionDataDelegate>
+@property(nonatomic) uint8_t *dst;
+@property(nonatomic) size_t cap, got;
+@property(nonatomic) BOOL overflow;
+@property(nonatomic, strong) dispatch_semaphore_t done;
+@property(nonatomic, strong, nullable) NSError *error;
+@end
+
+@implementation MFRangeTask
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveResponse:(NSURLResponse *)r
+    completionHandler:(void (^)(NSURLSessionResponseDisposition))handler {
+    long status = [r isKindOfClass:NSHTTPURLResponse.class] ? (long)((NSHTTPURLResponse *)r).statusCode : 0;
+    handler(status == 206 ? NSURLSessionResponseAllow : NSURLSessionResponseCancel);
+}
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data {
+    if (self.overflow) return;
+    if (data.length > self.cap - self.got) {
+        self.overflow = YES;
+        [task cancel];
+        return;
+    }
+    [data enumerateByteRangesUsingBlock:^(const void *bytes, NSRange range, BOOL *stop) {
+        memcpy(self.dst + self.got, bytes, range.length);
+        self.got += range.length;
+    }];
+}
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(nullable NSError *)error {
+    self.error = error;
+    dispatch_semaphore_signal(self.done);
+}
+@end
+
 /* DLC page downloads (port/src/net.c): bytes [off, off + len) of url with a range request, on the
    caller's (worker) thread. Returns 1 ok, 0 retry, -1 do not retry; final_url gets the URL after
    redirects so net.c can reuse it. */
@@ -116,21 +151,17 @@ int ios_http_range(const char *url, uint64_t off, size_t len, uint8_t *dst, uint
                                                  (unsigned long long)(off + len - 1)]
             forHTTPHeaderField:@"Range"];
         [req setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
-        __block NSData *body = nil;
-        __block NSHTTPURLResponse *resp = nil;
-        __block NSError *error = nil;
-        dispatch_semaphore_t done = dispatch_semaphore_create(0);
-        NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:req
-            completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-                body = d;
-                resp = [r isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)r : nil;
-                error = e;
-                dispatch_semaphore_signal(done);
-            }];
+        MFRangeTask *rt = [MFRangeTask new];
+        rt.dst = dst;
+        rt.cap = len;
+        rt.done = dispatch_semaphore_create(0);
+        NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:req];
+        task.delegate = rt;
         [task resume];
-        dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
-        if (error || !resp) {
-            snprintf(err, errlen, "Network error: %s", error ? error.localizedDescription.UTF8String : "no response");
+        dispatch_semaphore_wait(rt.done, DISPATCH_TIME_FOREVER);   /* the request's 60 s idle timeout ends it */
+        NSHTTPURLResponse *resp = [task.response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)task.response : nil;
+        if (!resp) {
+            snprintf(err, errlen, "Network error: %s", rt.error ? rt.error.localizedDescription.UTF8String : "no response");
             return 0;
         }
         long status = (long)resp.statusCode;
@@ -148,8 +179,9 @@ int ios_http_range(const char *url, uint64_t off, size_t len, uint8_t *dst, uint
             snprintf(err, errlen, "The server sent the wrong part of the file.");
             return -1;
         }
-        if (body.length != len) { snprintf(err, errlen, "Download interrupted."); return 0; }
-        memcpy(dst, body.bytes, len);
+        if (rt.overflow) { snprintf(err, errlen, "The server sent the wrong part of the file."); return -1; }
+        if (rt.error) { snprintf(err, errlen, "Network error: %s", rt.error.localizedDescription.UTF8String); return 0; }
+        if (rt.got != len) { snprintf(err, errlen, "Download interrupted."); return 0; }
         *total = t;
         NSString *fin = resp.URL.absoluteString;
         if (fin && ![fin isEqualToString:u.absoluteString]) snprintf(final_url, final_cap, "%s", fin.UTF8String);

@@ -276,9 +276,7 @@ static BOOL Busy(const DlcDlStatus *st) {
         return [NSString stringWithFormat:@"%d pack%@, %d songs installed.", self.page->installed_packs,
                                           self.page->installed_packs == 1 ? @"" : @"s", self.page->installed_songs];
     }
-    if (section == MFDlcSectionDownload)
-        return @"Packs download from this link. It starts as the archive.org copy of the “All DLC Included” IPA; enter the link of another IPA with the DLC packs to use that one.";
-    return @"Tap a pack to download it, or tap it again to cancel.";
+    return nil;
 }
 
 /* the title as one unbreakable word: Japanese text may otherwise wrap between any two characters */

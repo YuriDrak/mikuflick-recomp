@@ -58,7 +58,7 @@ final class DlcPage extends NativePage {
     private ImageView importIcon;
     private View restoreRow, restoreSep;
     private ProgressBar statusSpinner, statusBar;
-    private View statusRow, packsHeader, packsFooter;
+    private View statusRow, packsHeader;
     private LinearLayout packsCard;
     private final List<PackRow> packRows = new ArrayList<>();
     private boolean updatingSwitch;
@@ -259,14 +259,11 @@ final class DlcPage extends NativePage {
         statusRow = status;
         dl.addView(status, lp(MATCH, WRAP));
         col.addView(dl, lp(MATCH, WRAP));
-        footer(col).setText("Packs download from this link. It starts as the archive.org copy of the \u201cAll DLC Included\u201d IPA; enter the link of another IPA with the DLC packs to use that one.");
 
         /* packs */
         packsHeader = header(col, "Packs");
         packsCard = card();
         col.addView(packsCard, lp(MATCH, WRAP));
-        packsFooter = footer(col);
-        ((TextView) packsFooter).setText("Tap a pack to download it, or tap it again to cancel.");
 
         apply();
         return root;
@@ -446,7 +443,6 @@ final class DlcPage extends NativePage {
         boolean any = !packs.isEmpty();
         setVisible(packsHeader, any);
         setVisible(packsCard, any);
-        setVisible(packsFooter, any);
         if (packRows.size() != packs.size()) {
             packsCard.removeAllViews();
             packRows.clear();

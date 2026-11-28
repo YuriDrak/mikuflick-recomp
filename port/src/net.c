@@ -188,7 +188,7 @@ static int http_range(Net *n, const char *url, uint64_t off, size_t len, uint8_t
     snprintf(range, sizeof range, "%llu-%llu", (unsigned long long)off, (unsigned long long)(off + len - 1));
     char *argv[] = {"curl", "-sS", "-L", "--max-redirs", "8", "--proto", "=http,https", "--proto-redir", "=http,https",
                     "--connect-timeout", "20", "--speed-limit", "1024", "--speed-time", "60", "-r", range, "-D", "-",
-                    (char *)url, NULL};
+                    "--suppress-connect-headers", (char *)url, NULL};   /* no proxy CONNECT reply in -D */
     int pfd[2];
     if (pipe(pfd) != 0) { snprintf(n->err, sizeof n->err, "pipe: %s", strerror(errno)); return HTTP_FATAL; }
     posix_spawn_file_actions_t fa;

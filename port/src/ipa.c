@@ -1047,6 +1047,16 @@ static bool rewrite_gamedata(const DlcCatalog *c, const char *app_dir, const cha
     return true;
 }
 
+/* a cancelled pack leaves nothing behind: the files this run finished are removed again */
+static void drop_written(const Entry *const *files, const bool *wrote, int nf, const char *app_dir) {
+    char path[1200];
+    for (int i = 0; i < nf; i++)
+        if (wrote[i]) {
+            snprintf(path, sizeof path, "%s/%s", app_dir, dlc_pack_file(files[i]->name));
+            remove(path);
+        }
+}
+
 bool dlc_catalog_install(DlcCatalog *c, int pack, const char *app_dir, const char *gamedata, IpaProgress cb, void *ud,
                          const volatile int *cancel, char *err, size_t errlen) {
     if (strlen(app_dir) > 1000 || strlen(gamedata) > 1000) { seterr(err, errlen, "Storage path too long."); return false; }
@@ -1084,11 +1094,17 @@ bool dlc_catalog_install(DlcCatalog *c, int pack, const char *app_dir, const cha
             return false;
         }
     }
+    bool wrote[PACK_FILES] = {false};   /* written by this run: removed again on cancel */
     Job j = {.cb = cb, .ud = ud, .total_c = total_c};
     for (int i = 0; i < nf; i++) {
         if (!todo[i]) continue;
         const char *name = dlc_pack_file(files[i]->name);
-        if (cancel && *cancel) { free(gd_text); seterr(err, errlen, "Cancelled."); return false; }
+        if (cancel && *cancel) {
+            drop_written(files, wrote, nf, app_dir);
+            free(gd_text);
+            seterr(err, errlen, "Cancelled.");
+            return false;
+        }
         snprintf(path, sizeof path, "%s/%s", app_dir, name);
         snprintf(part, sizeof part, "%s.part", path);
         j.f = fopen(part, "wb");
@@ -1101,10 +1117,14 @@ bool dlc_catalog_install(DlcCatalog *c, int pack, const char *app_dir, const cha
         if (good && rename(part, path) != 0) { good = false; seterr(err, errlen, "Cannot write %s (%s).", path, strerror(errno)); }
         if (!good) {
             remove(part);
-            if (cancel && *cancel) seterr(err, errlen, "Cancelled.");
+            if (cancel && *cancel) {   /* a failure keeps the finished files: a retry picks up from there */
+                drop_written(files, wrote, nf, app_dir);
+                seterr(err, errlen, "Cancelled.");
+            }
             free(gd_text);
             return false;
         }
+        wrote[i] = true;
     }
     bool ok = rewrite_gamedata(c, app_dir, gamedata, gd_text, err, errlen);
     free(gd_text);
