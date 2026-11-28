@@ -3,17 +3,19 @@
 # made on the runner, so installing a newer one over it needs an uninstall first. Neither contains
 # game data: both import the player's own IPA on first start.
 #
-# When a GitHub release is published, the iOS job also stamps the release version into the app and
-# uploads MikuFlick.ipa plus an AltStore/SideStore/Feather source (altsource.json, ios/altsource.sh)
-# to that release. Source URL: https://github.com/<owner>/<repo>/releases/latest/download/altsource.json
+# Releasing: push a version tag from your machine, e.g.
+#     git tag v0.4.1 && git push origin v0.4.1
+# The workflow builds everything, stamps the version into the iOS app, then creates the GitHub
+# release with the Linux tarball, the iOS IPA, the Android APK and an AltStore/SideStore/Feather
+# source (altsource.json, ios/altsource.sh).
+# Source URL: https://github.com/<owner>/<repo>/releases/latest/download/altsource.json
 name: build
 
 on:
   push:
-    branches: ['**']
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -38,12 +40,23 @@ jobs:
         run: make -C port -j"$(nproc)"
       - name: Build mfextract
         run: make -C port ../build/mfextract
+      - name: Package
+        if: github.ref_type == 'tag'
+        run: |
+          # ADJUST: list here the files that make up the Linux build (game binary, mfextract, ...)
+          mkdir -p dist/MikuFlick-linux
+          cp build/mfextract dist/MikuFlick-linux/
+          tar -C dist -czf dist/MikuFlick-linux-x86_64.tar.gz MikuFlick-linux
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag'
+        with:
+          name: release-linux
+          path: dist/MikuFlick-linux-x86_64.tar.gz
+          if-no-files-found: error
 
   ios:
     name: iOS (unsigned IPA)
     runs-on: macos-26
-    permissions:
-      contents: write   # release assets (release events only)
     steps:
       - uses: actions/checkout@v4
       - name: Cache SDL sources
@@ -58,9 +71,9 @@ jobs:
           mkdir -p dist/Payload
           cp -R ios/build/iphoneos/Release-iphoneos/MikuFlick.app dist/Payload/
       - name: Release version
-        if: github.event_name == 'release'
+        if: github.ref_type == 'tag'
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_name }}
           BUILD: ${{ github.run_number }}
         run: |
           version=$(printf '%s' "$TAG" | sed -E 's/^[^0-9]*//')   # v0.4.0 -> 0.4.0
@@ -74,18 +87,28 @@ jobs:
           name: MikuFlick-ios-unsigned-${{ github.sha }}
           path: dist/MikuFlick-unsigned.ipa
           if-no-files-found: error
-      - name: Upload to the release with an AltSource
-        if: github.event_name == 'release'
+      - name: Build the AltSource
+        if: github.ref_type == 'tag'
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-          NOTES: ${{ github.event.release.body }}
+          TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
-          mv dist/MikuFlick-unsigned.ipa dist/MikuFlick.ipa
-          sh ios/altsource.sh dist/Payload/MikuFlick.app dist/MikuFlick.ipa \
-            "https://github.com/$REPO/releases/download/$TAG/MikuFlick.ipa" dist/altsource.json
-          gh release upload "$TAG" dist/MikuFlick.ipa dist/altsource.json --clobber -R "$REPO"
+          version=$(printf '%s' "$TAG" | sed -E 's/^[^0-9]*//')   # v0.4.1 -> 0.4.1
+          IPA="MikuFlick-$version-iOS.ipa"
+          # The release does not exist yet: use the tag message as notes (empty if lightweight tag)
+          NOTES=$(git for-each-ref --format='%(contents)' "refs/tags/$TAG" || true)
+          export NOTES
+          mv dist/MikuFlick-unsigned.ipa "dist/$IPA"
+          sh ios/altsource.sh dist/Payload/MikuFlick.app "dist/$IPA" \
+            "https://github.com/$REPO/releases/download/$TAG/$IPA" dist/altsource.json
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag'
+        with:
+          name: release-ios
+          path: |
+            dist/MikuFlick-*-iOS.ipa
+            dist/altsource.json
+          if-no-files-found: error
 
   android:
     name: Android (debug APK)
@@ -95,7 +118,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
       - name: Cache downloads and Gradle
         uses: actions/cache@v4
         with:
@@ -117,3 +140,42 @@ jobs:
           name: MikuFlick-android-debug-${{ github.sha }}
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+      - name: Name the release APK
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(printf '%s' "$TAG" | sed -E 's/^[^0-9]*//')
+          cp android/app/build/outputs/apk/debug/app-debug.apk "mikuflick-$version-android.apk"
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag'
+        with:
+          name: release-android
+          path: mikuflick-*-android.apk
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs: [linux, ios, android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the release and upload assets
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: assets
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          ls -l assets
+          if gh release view "$TAG" -R "$REPO" > /dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --clobber -R "$REPO"
+          else
+            gh release create "$TAG" assets/* --title "$TAG" --generate-notes --verify-tag -R "$REPO"
+          fi
