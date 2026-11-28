@@ -193,6 +193,8 @@ final class DlcPage extends NativePage {
         linkField.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
         linkField.setBackground(null);
         linkField.setPadding(0, dp(2), 0, dp(2));
+        linkField.setHorizontalFadingEdgeEnabled(true);   /* a long link fades out instead of being cut off */
+        linkField.setFadingEdgeLength(dp(28));
         linkField.setOnEditorActionListener((v, id, ev) -> {
             linkField.clearFocus();   /* commits through the focus listener */
             return true;
