@@ -69,8 +69,8 @@ uninstalled.
 - The flick board takes multi-touch, as on iOS. Menus, the pause button
   (bottom right), the pause menu and the PV viewer react to taps.
 - Tall (or wide) screens keep the original 2:3 layout centred, so every key
-  stays where it was on iOS; the bars around it show a blurred copy of the
-  song video (or of the menu).
+  stays where it was on iOS; the bars around it are black during a song and
+  show a dim, blurred copy of the menu elsewhere.
 - The **Back** button works like Esc: cancel in menus, pause during a song,
   leave the PV viewer, and exit from the title screen.
 - Leaving the app during a song opens the pause menu.

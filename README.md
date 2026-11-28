@@ -13,7 +13,7 @@ A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for
 - Streaming MPEG-1 video and two ADX audio tracks (vocals + backing) decoded directly from the original `.usm` files by built-in decoders (no FFmpeg needed).
 - Result screen with ranks and the per-key FLICK RESULT page; RESULTS / RECORDS (from the title's crown) with your best score per song and difficulty; a persistent local save file.
 - Mouse and multi-touch flick input, keyboard equivalents for every screen, input-timing calibration, fullscreen and volume controls.
-- Any screen shape: the original 2:3 layout stays centred (keys exactly where they were on iOS), and the bars on tall phones or wide monitors show a blurred copy of the video or menu.
+- Any screen shape: the original 2:3 layout stays centred (keys exactly where they were on iOS), and the bars on wide monitors show a blurred copy of the video or menu (on phones: black during a song, a dim blur of the menu elsewhere).
 - Android app (APK) built from the same C sources: touch, Back button, pause when the app is left. See [`android/README.md`](android/README.md).
 - iOS app built from the same C sources: native Files picker for IPA import, scene-based lifecycle, automatic signing. See [`ios/README.md`](ios/README.md).
 - Headless modes for automated verification (`--autoplay`, `--autoplay-input`, screenshot and script modes).

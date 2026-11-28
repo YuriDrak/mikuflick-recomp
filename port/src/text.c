@@ -7,6 +7,7 @@
 #include "mf.h"
 
 #include <SDL_ttf.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -26,6 +27,8 @@ typedef struct {
 
 static struct {
     char path[1280];
+    void *data;          /* the font file, read once: every size opens from memory */
+    size_t size;
     bool ok;
     SizedFont sizes[MAX_SIZES];
     int nsizes;
@@ -43,12 +46,20 @@ static const char *k_system_fonts[] = {
     NULL,
 };
 
+/* The whole file is read into memory first. On Android the bundled font is an APK asset, stored
+   compressed; reading it as a stream, every backward seek FreeType makes (it jumps between the font
+   tables for each new glyph) inflates the asset again from its start, so new text took seconds. */
 static bool try_font(const char *p) {
     if (!p || !*p) return false;
-    TTF_Font *f = TTF_OpenFont(p, 24);
-    if (!f) return false;
+    size_t n = 0;
+    void *data = SDL_LoadFile(p, &n);
+    if (!data) return false;
+    TTF_Font *f = n <= INT_MAX ? TTF_OpenFontRW(SDL_RWFromConstMem(data, (int)n), 1, 24) : NULL;
+    if (!f) { SDL_free(data); return false; }
     TTF_CloseFont(f);
     snprintf(T.path, sizeof T.path, "%s", p);
+    T.data = data;
+    T.size = n;
     return true;
 }
 
@@ -80,7 +91,7 @@ bool text_init(const char *font_path) {
 
 static TTF_Font *font_px(int px) {
     for (int i = 0; i < T.nsizes; i++) if (T.sizes[i].px == px) return T.sizes[i].f;
-    TTF_Font *f = TTF_OpenFont(T.path, px);
+    TTF_Font *f = TTF_OpenFontRW(SDL_RWFromConstMem(T.data, (int)T.size), 1, px);
     if (!f) return NULL;
     TTF_SetFontHinting(f, TTF_HINTING_LIGHT);
     if (T.nsizes == MAX_SIZES) { TTF_CloseFont(T.sizes[0].f); memmove(T.sizes, T.sizes + 1, sizeof T.sizes[0] * (MAX_SIZES - 1)); T.nsizes--; }
@@ -178,6 +189,7 @@ bool text_has_glyph(Uint32 cp) {
 void text_quit(void) {
     for (int i = 0; i < CACHE; i++) if (T.cache[i].tex) SDL_DestroyTexture(T.cache[i].tex);
     for (int i = 0; i < T.nsizes; i++) TTF_CloseFont(T.sizes[i].f);
+    SDL_free(T.data);
     memset(&T, 0, sizeof T);
     TTF_Quit();
 }

@@ -60,7 +60,7 @@ The Android build is described in `../android/README.md`. The iOS build is descr
 
 ## Display
 
-The game is laid out on the original 640×960 (2:3) screen. It is drawn into an off-screen 640×960 image that is shown centred and scaled to fit the window (`src/view.c`), so the keys and touch areas never move. On screens that are taller or wider than 2:3 (most phones, wide monitors in fullscreen), the bars around it show a blurred, darkened copy of the song video, or of the menu. Mouse and touch positions are mapped back through the same rectangle.
+The game is laid out on the original 640×960 (2:3) screen. It is drawn into an off-screen 640×960 image that is shown centred and scaled to fit the window (`src/view.c`), so the keys and touch areas never move. On screens that are taller or wider than 2:3 (most phones, wide monitors in fullscreen), the bars around it show a blurred, darkened copy of the song video, or of the menu. On phones (iOS, Android) the bars stay black during a song and the menu blur is dimmer. Mouse and touch positions are mapped back through the same rectangle.
 
 ## Media decoding
 
