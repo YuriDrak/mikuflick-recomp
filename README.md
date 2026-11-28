@@ -4,6 +4,20 @@ A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for
 
 > **This repository ships no game data.** It contains no SEGA/Crypton assets, music, video, artwork or charts. You need your own legally obtained, decrypted copy of `com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa` [ios3-6-ipas](https://archive.org/download/ios3-6-ipas) (v1.1.5, armv7). The port extracts the IPA locally and reads its tables, movies, audio and textures at runtime.
 
+## Download
+
+Ready-made builds are on the [latest release](https://github.com/YuriDrak/mikuflick-recomp/releases/latest). On first start, each app asks for your IPA and imports it.
+
+- **iOS (AltStore, SideStore or Feather):** add this source URL in the app's Sources screen:
+
+  ```text
+  https://github.com/YuriDrak/mikuflick-recomp/releases/latest/download/altsource.json
+  ```
+
+  Add this exact link, not the repository link (`https://github.com/YuriDrak/mikuflick-recomp`): the repository page is not a source, so the app cannot read it. The source always lists the latest release's IPA, so the app is offered updates as new releases come out, and AltStore, SideStore or Feather re-signs it on your device. You can also download `MikuFlick-<version>-iOS.ipa` from the release and sign it yourself. iOS 26.0 or newer.
+- **Android:** download `mikuflick-<version>-android.apk` from the release and open it on the phone (Android 7.0 or newer). Each release is signed with a different key, so to update you must uninstall the old version first. Uninstalling also deletes the imported game data and your saves.
+- **Linux:** build it from source; see [Build and set up](#build-and-set-up).
+
 ## Features
 
 - Boot logos, title screen and music select with cover flow, artwork, star ratings and song previews.
@@ -14,11 +28,12 @@ A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for
 - Result screen with ranks and the per-key FLICK RESULT page; RESULTS / RECORDS (from the title's crown) with your best score per song and difficulty; a persistent local save file.
 - Mouse and multi-touch flick input, keyboard equivalents for every screen, input-timing calibration, fullscreen and volume controls.
 - Any screen shape: the original 2:3 layout stays centred (keys exactly where they were on iOS), and the bars on wide monitors show a blurred copy of the video or menu (on phones: black during a song, a dim blur of the menu elsewhere).
-- Android app (APK) built from the same C sources: touch, Back button, pause when the app is left. See [`android/README.md`](android/README.md).
-- iOS app built from the same C sources: native Files picker for IPA import, scene-based lifecycle, automatic signing. See [`ios/README.md`](ios/README.md).
+- DLC songs: the 63 songs of the 21 DLC packs, from an IPA that includes them, or downloaded one pack at a time from the DLC page. See [DLC songs](#dlc-songs).
+- Android app (APK) built from the same C sources: touch, Back button, pause when the app is left. The IPA import and DLC page are native Android screens. See [`android/README.md`](android/README.md).
+- iOS app built from the same C sources: the IPA import (with the Files picker) and DLC page are native UIKit screens; scene-based lifecycle. See [`ios/README.md`](ios/README.md).
 - Headless modes for automated verification (`--autoplay`, `--autoplay-input`, screenshot and script modes).
 
-All 11 bundled songs and all five difficulties (Easy, Normal, Hard, Extreme, Break the Limit) are unlocked. IPAs that carry the DLC packs (the iMazing-style "All DLC Included" package with a `Container/` folder) also give you the 63 DLC songs, and the DLC page can download single packs out of such an IPA from a link; see [DLC songs](#dlc-songs).
+All 11 bundled songs and all five difficulties (Easy, Normal, Hard, Extreme, Break the Limit) are unlocked.
 
 ## Requirements
 
@@ -29,7 +44,7 @@ sudo apt install build-essential pkg-config \
   libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
 ```
 
-`unzip` is used by the one-time `setup` step; the built-in importer (`--import-ipa`, or **Import IPA** in the Android app) does not need it. The Android build has its own requirements (JDK 17+, about 4 GB of disk for the SDK/NDK it downloads into the project); see [`android/README.md`](android/README.md).
+`unzip` is used by the one-time `setup` step; the built-in importer (`--import-ipa`, or **Import IPA** in the Android and iOS apps) does not need it. DLC pack downloads on Linux use the `curl` tool. The Android build has its own requirements (JDK 17+, about 4 GB of disk for the SDK/NDK it downloads into the project); see [`android/README.md`](android/README.md).
 
 ## Build and set up
 
@@ -44,7 +59,7 @@ make -C port setup IPA="/path/to/com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa"
 ./port/mikuflick
 ```
 
-`setup` unpacks the IPA into `extracted/ipa/` (about 1 GB, path-safety checked) and writes `port/data/gamedata.txt` from your `MikuFlick2` binary. `mfextract` verifies the binary UUID and refuses any other build. Alternatively, `./port/mikuflick --import-ipa your.ipa --import-to DIR` runs the same importer the Android app uses (no `unzip` needed) and writes `DIR/MikuFlick2.app` and `DIR/gamedata.txt`; start the game with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
+`setup` unpacks the IPA into `extracted/ipa/` (about 1 GB, path-safety checked) and writes `port/data/gamedata.txt` from your `MikuFlick2` binary. `mfextract` verifies the binary UUID and refuses any other build. If the IPA includes the DLC packs, `setup` adds those songs too (see [DLC songs](#dlc-songs)). Alternatively, `./port/mikuflick --import-ipa your.ipa --import-to DIR` runs the same importer the Android and iOS apps use (no `unzip` needed) and writes `DIR/MikuFlick2.app` and `DIR/gamedata.txt`; start the game with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
 
 If you already have an extracted app bundle, you can skip the IPA argument:
 
@@ -57,10 +72,10 @@ make -C port setup          # uses extracted/ipa/Payload/MikuFlick2.app
 ### Runtime options
 
 ```text
---app DIR            extracted MikuFlick2.app directory
+--app DIR            extracted MikuFlick2.app directory (default extracted/ipa/Payload/MikuFlick2.app)
 --gamedata FILE      tables exported by mfextract (default port/data/gamedata.txt)
 --data DIR           save directory (default ~/.local/share/mikuflick-port)
---song N --diff D    jump straight into a song (diff 0 Easy … 3 Extreme, 4 Break the Limit)
+--song N --diff D    jump straight into a song (N from 0; diff 0 Easy … 3 Extreme, 4 Break the Limit)
 --offset N           input-timing steps -10..10 for this session (overrides the per-song pause-menu value)
 --volume F           music volume
 --se-volume F        sound-effect volume
@@ -70,6 +85,8 @@ make -C port setup          # uses extracted/ipa/Payload/MikuFlick2.app
 --window WxH         window size
 --import-ipa FILE    import your own IPA into --import-to DIR (default imported/) and exit
 --import-to DIR      destination for --import-ipa
+--dlc-url URL        list the DLC packs of the IPA at URL and exit
+--dlc-get LIST       with --dlc-url: install packs (1,2,97 or all) into --app/--gamedata and exit
 ```
 
 `--import-ipa` writes `DIR/MikuFlick2.app/` and `DIR/gamedata.txt`; start the game with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
@@ -100,7 +117,9 @@ See [`port/README.md`](port/README.md) for the full control and UI description.
 
 ## Android
 
-The same sources build into an Android app (arm64-v8a, armeabi-v7a, x86_64; Android 7.0+). The `android/Makefile` downloads the SDK, NDK, Gradle and SDL sources into the project (gitignored). On the phone, the app imports your own IPA itself: copy the `.ipa` to the phone, tap **Import IPA** on the first start and pick it. No PC is needed for that step.
+The same sources build into an Android app (arm64-v8a, armeabi-v7a, x86_64; Android 7.0+). A ready-made APK is on each release (see [Download](#download)). On the phone, the app imports your own IPA itself: copy the `.ipa` to the phone, tap **Import IPA** on the first start and pick it. No PC is needed for that step.
+
+To build it yourself, the `android/Makefile` downloads the SDK, NDK, Gradle and SDL sources into the project (gitignored):
 
 ```sh
 make -C android toolchain        # downloads into android/third_party/
@@ -113,7 +132,11 @@ Details, controls and debugging: [`android/README.md`](android/README.md).
 
 ## iOS
 
-The same sources build into an iOS app (arm64, iOS 26.0+). The `ios/Makefile` wraps CMake and fetches SDL dependencies. On first launch, the app presents a native Files picker to import your own IPA.
+The same sources build into an iOS app (arm64, iOS 26.0+). On first launch, the app presents a native Files picker to import your own IPA.
+
+To install it from AltStore, SideStore or Feather, add the source URL given under [Download](#download), not the repository link.
+
+To build it yourself, the `ios/Makefile` wraps CMake and fetches the SDL dependencies:
 
 ```sh
 make -C ios sim                  # Simulator build (arm64)
@@ -133,7 +156,14 @@ Then select your device in Xcode and run. Details: [`ios/README.md`](ios/README.
 
 Every push and pull request runs `.github/workflows/build.yml` on GitHub Actions, which builds the Linux port, an **unsigned iOS IPA** (`MikuFlick-unsigned.ipa`, Release, arm64) and an Android **debug APK**. Download them from the run's **Artifacts** section. Sign the IPA yourself (your own certificate or a sideloading app) before installing it. The debug APK is signed with a key made on the runner for each run, so uninstall the previous one before installing another (your imported data goes with it). Like the source, these builds contain no game data: the app asks for your own IPA on first start.
 
-When a GitHub release is published, the same workflow sets the app's version from the release tag and attaches `MikuFlick.ipa` and an AltSource, `altsource.json` (made by `ios/altsource.sh`), to the release. To install and update the iOS app from AltStore, SideStore or Feather, add this source: `https://github.com/YuriDrak/mikuflick-recomp/releases/latest/download/altsource.json`. The app is re-signed on your device by that app.
+Pushing a version tag (for example `v0.4.1`) makes the same workflow publish a GitHub release. The workflow sets the iOS app's version from the tag and attaches these files to the release:
+
+- `MikuFlick-<version>-iOS.ipa`;
+- `mikuflick-<version>-android.apk`;
+- `MikuFlick-linux-x86_64.tar.gz` (for now it holds only the `mfextract` tool, not the game);
+- the AltSource, `altsource.json` (made by `ios/altsource.sh`).
+
+For AltStore, SideStore or Feather, add the source URL given under [Download](#download), not the repository link.
 
 ## Repository layout
 
@@ -141,9 +171,9 @@ When a GitHub release is published, the same workflow sets the app's version fro
 |---|---|
 | `port/` | The game: C sources shared by Linux, Android and iOS, Linux `Makefile`, bundled M+ font and the `pl_mpeg` (MIT) video decoder, detailed README. |
 | `android/` | Android build: Gradle/CMake project, `Makefile` that fetches the toolchain into `android/third_party/` (ignored), README. |
-| `ios/` | iOS build: CMake/Makefile project, Objective-C bridge, native Files picker for IPA import, README. |
+| `ios/` | iOS build: CMake/Makefile project, Objective-C bridge, native IPA import and DLC screens, the AltSource script, README. |
 | `docs/` | Reverse-engineering notes, the port design plan and the original IPA archive inventory. |
-| `.github/workflows/` | CI: builds the Linux port, the unsigned iOS IPA and the Android debug APK (see [Builds from CI](#builds-from-ci)). |
+| `.github/workflows/` | CI: builds the Linux port, the unsigned iOS IPA and the Android debug APK, and publishes a release for a version tag (see [Builds from CI](#builds-from-ci)). |
 | `tools/` | Self-contained C utilities and scripts used during analysis (`machoinfo`, `usmdump`, `bplist2json`, `mfextract`, Ghidra helpers, IPA extractor). `mfextract` shares the table reader in `port/src/mfx.c`. |
 | `CLAUDE.md` | Agent operational rules and the current project status. |
 | `extracted/` | *Ignored.* Your extracted game bundle, created by `make setup`. |
@@ -163,13 +193,13 @@ When a GitHub release is published, the same workflow sets the app's version fro
 
 The original game downloaded its DLC packs from SEGA's server, which no longer exists. Some IPAs (for example the iMazing-style "All DLC Included" package) carry a `Container/` folder next to `Payload/`: the game's data folder from a device that owned the packs, with the unpacked packs in `Container/Library/InstallData/Mov_*/` and the original save `Container/Documents/MikuFlick2.dat`. That save is the only remaining copy of the DLC song list (titles, BPM, difficulty stars, file names).
 
-Both `make -C port setup IPA=…` and the importer (`--import-ipa`, **IMPORT IPA** on Android) pick these up automatically: the pack files go next to the app's files and the DLC songs are added to `gamedata.txt` from that save, after the 11 built-in songs. Packs whose files are missing are skipped. Importing an IPA without `Container/` afterwards keeps the DLC songs you already have (the importer moves them over). The full package needs about 7 GB of free space.
+Both `make -C port setup IPA=…` and the importer (`--import-ipa`, **Import IPA** on Android and iOS) pick these up automatically: the pack files go next to the app's files and the DLC songs are added to `gamedata.txt` from that save, after the 11 built-in songs. Packs whose files are missing are skipped. Importing an IPA afterwards keeps the DLC packs you already have that it does not bring itself, including downloaded ones (the importer moves them over). The full package needs about 7 GB of free space.
 
-The title menu's **DLC** button (the original SHOP slot) opens the DLC page: it shows how many packs and songs are installed, has a **SHOW DLC SONGS** ON/OFF switch (saved) that hides or shows them in music select and PV mode. On iOS and Android the page is a native screen of the system's own controls, with an **Import IPA with DLC** row to import a DLC IPA without reinstalling.
+The title menu's **DLC** button (the original SHOP slot) opens the DLC page. It shows how many packs and songs are installed and has a **Show DLC Songs** switch (saved) that hides or shows them in music select and PV mode. It also lists the packs for download (below). On desktop the page is drawn by the game. On iOS and Android it is a native screen of the system's own controls, with an **Import IPA with DLC** row to import a DLC IPA without reinstalling.
 
 ### Downloading single packs
 
-You don't need the whole 7 GB file. The DLC page comes with the link of the archive.org copy of the "All DLC Included" IPA ([miku-flick-2-1.1.5](https://archive.org/details/miku-flick-2-1.1.5)), so opening it is enough. The link is an editable field: to use another IPA that includes the DLC packs, enter its direct download link there (on desktop, click the field or press `Ctrl+V`/`Cmd+V` to paste). **Restore Default Link** appears whenever the link differs from the built-in one, so the archive.org link is never lost. The game reads that IPA's pack list over the network (about 1 MB: the zip directory and the original save), then shows the 21 packs with their songs and sizes. Tap a pack to download it: only that pack's files are fetched (230–360 MB each), checked against the archive's CRCs, and its songs show up right away. Tap the pack again while it downloads to cancel. A link you enter is saved for next time.
+You don't need the whole 7 GB file. The DLC page comes with the link of the archive.org copy of the "All DLC Included" IPA ([miku-flick-2-1.1.5](https://archive.org/details/miku-flick-2-1.1.5)), so opening it is enough. The link is an editable field: to use another IPA that includes the DLC packs, enter its direct download link there (on desktop, click the field or press `Ctrl+V`/`Cmd+V` to paste). **Restore Default Link** appears whenever the link differs from the built-in one, so the archive.org link is never lost. The game reads that IPA's pack list over the network (about 1 MB: the zip directory and the original save), then shows the 21 packs with their songs and sizes. Tap a pack to download it: only that pack's files are fetched (230–360 MB each), checked against the archive's CRCs, and its songs show up right away. Tap the pack again while it downloads to cancel; the files of a cancelled pack are removed again. Packs that the linked IPA does not contain are shown greyed out. Songs show their English title next to the Japanese one. A link you enter is saved for next time.
 
 This works with any link whose server allows partial downloads (HTTP range requests), such as archive.org's download links; a web page about the file (e.g. an archive.org `details/` page) is not enough, the link must lead to the `.ipa` file itself. Nothing is uploaded; the built-in link is `DLC_DEFAULT_URL` in `port/src/dlcdl.h`. Downloads use the `curl` tool on Linux/macOS, the system's HTTP stack on Android and iOS. From the command line: `./port/mikuflick --dlc-url URL` lists the packs and `--dlc-get 1,97` (or `all`) installs them into `--app`/`--gamedata`. High scores of DLC songs are saved by song (the song field of their `rec` lines in `save.txt` is the movie name), so they survive re-imports.
 
@@ -183,7 +213,7 @@ The shop (buying DLC), Game Center, Twitter, ads, replays, the collection and PV
 SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy ./port/mikuflick --autoplay --exit-after-song
 ```
 
-Additional flags: `--autoplay-input`, `--shot-dir DIR --shot-times 8,30`, `--shot-ui-times 0.5,3`, `--start-scene title|select|result|options|pv|credits|ending|movie|scores|records`, `--script "9:enter,12:right"`. See [`port/README.md`](port/README.md).
+Additional flags: `--autoplay-input`, `--shot-dir DIR --shot-times 8,30`, `--shot-ui-times 0.5,3`, `--start-scene title|select|result|options|pv|credits|ending|movie|scores|records|dlc` (on Android and iOS also `import|import-update`, the native import screen as on a first start or an outdated install), `--script "9:enter,12:right"`. See [`port/README.md`](port/README.md).
 
 ## Reverse-engineering tools
 
@@ -202,7 +232,7 @@ Ghidra is **not** vendored. To use `tools/ghidra_decompile.sh`, download Ghidra 
 
 - The port source and documentation are released under the MIT License — see [`LICENSE`](LICENSE).
 - MPEG-1 video decoding: [pl_mpeg](https://github.com/phoboslab/pl_mpeg) by Dominic Szablewski, MIT License (`port/third_party/pl_mpeg.h`, with a small patch for the 11-bit intra DC precision of the game's videos, marked `MIKUFLICK PATCH`).
-- The Android build uses [SDL2, SDL2_image and SDL2_ttf](https://github.com/libsdl-org) (zlib License) and FreeType (FreeType License), downloaded at build time and not stored in this repository.
+- The Android and iOS builds use [SDL2, SDL2_image and SDL2_ttf](https://github.com/libsdl-org) (zlib License) and FreeType (FreeType License), downloaded at build time and not stored in this repository. The Android screens use Material icons (Apache License 2.0).
 - Menu font: **M+ 1p Bold**, © The M+ Project Authors, licensed under the SIL Open Font License 1.1 (`port/fonts/OFL.txt`).
 - *Miku Flick/02*, Hatsune Miku and all related artwork, music and game data are © SEGA / Crypton Future Media. No such material is included in this repository.
 
