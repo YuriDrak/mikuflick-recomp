@@ -133,6 +133,8 @@ Then select your device in Xcode and run. Details: [`ios/README.md`](ios/README.
 
 Every push and pull request runs `.github/workflows/build.yml` on GitHub Actions, which builds the Linux port, an **unsigned iOS IPA** (`MikuFlick-unsigned.ipa`, Release, arm64) and an Android **debug APK**. Download them from the run's **Artifacts** section. Sign the IPA yourself (your own certificate or a sideloading app) before installing it. The debug APK is signed with a key made on the runner for each run, so uninstall the previous one before installing another (your imported data goes with it). Like the source, these builds contain no game data: the app asks for your own IPA on first start.
 
+When a GitHub release is published, the same workflow sets the app's version from the release tag and attaches `MikuFlick.ipa` and an AltSource, `altsource.json` (made by `ios/altsource.sh`), to the release. To install and update the iOS app from AltStore, SideStore or Feather, add this source: `https://github.com/YuriDrak/mikuflick-recomp/releases/latest/download/altsource.json`. The app is re-signed on your device by that app.
+
 ## Repository layout
 
 | Path | Contents |

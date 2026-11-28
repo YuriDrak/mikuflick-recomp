@@ -38,7 +38,7 @@ The repository ships **no SEGA/Crypton game data**. A user-supplied, decrypted I
 - **Testing aids**: `--autoplay`, `--autoplay-input`, `--exit-after-song`, `--shot-dir/--shot-times`, `--shot-ui-times`, `--start-scene`, `--script`, headless via dummy SDL drivers.
 - **RE tooling** (`tools/`): own C tools `machoinfo`, `usmdump`, `bplist2json`, `mfextract`, plus Ghidra scripts and IPA extractor. Ghidra is **not vendored**; `tools/ghidra_decompile.sh` uses `GHIDRA_DIR` or `tools/third_party/`.
 - **Docs**: `docs/archive_layout.md` (IPA inventory), `docs/re_notes.md` (formats, formulas, scene/render analysis), `docs/linux_port_plan.md` (design, timing, deviations, verification).
-- **CI** (`.github/workflows/build.yml`, branch `android-fixes`): every push/PR builds the Linux port, an unsigned Release iOS IPA (macos-26 runner) and the Android debug APK (runner-made debug key), uploaded as run artifacts; no game data in them.
+- **CI** (`.github/workflows/build.yml`, branch `android-fixes`): every push/PR builds the Linux port, an unsigned Release iOS IPA (macos-26 runner) and the Android debug APK (runner-made debug key), uploaded as run artifacts; no game data in them. Published releases also get `MikuFlick.ipa` (version from the tag) and `altsource.json` (`ios/altsource.sh`), so `releases/latest/download/altsource.json` is the AltStore/SideStore/Feather source.
 - **Movie deblocking** (`media.c`, pl_mpeg `plm_video_get_quantizer` patch): the 320×480 low-bit-rate movies get a post-filter that ramps out 8×8 block steps in smooth areas; `MF_NO_DEBLOCK=1` turns it off.
 
 ## Verified (see `docs/linux_port_plan.md` §7)

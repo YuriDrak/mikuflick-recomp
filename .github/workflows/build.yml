@@ -2,18 +2,25 @@
 # certificate or a sideloading app); the Android APK is a debug build signed with a throwaway key
 # made on the runner, so installing a newer one over it needs an uninstall first. Neither contains
 # game data: both import the player's own IPA on first start.
+#
+# When a GitHub release is published, the iOS job also stamps the release version into the app and
+# uploads MikuFlick.ipa plus an AltStore/SideStore/Feather source (altsource.json, ios/altsource.sh)
+# to that release. Source URL: https://github.com/<owner>/<repo>/releases/latest/download/altsource.json
 name: build
 
 on:
   push:
+    branches: ['**']
   pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -35,6 +42,8 @@ jobs:
   ios:
     name: iOS (unsigned IPA)
     runs-on: macos-26
+    permissions:
+      contents: write   # release assets (release events only)
     steps:
       - uses: actions/checkout@v4
       - name: Cache SDL sources
@@ -44,16 +53,39 @@ jobs:
           key: ios-deps-${{ hashFiles('android/SHA256SUMS', 'ios/App/fetch-deps.sh') }}
       - name: Build
         run: make -C ios device CONFIG=Release
-      - name: Package IPA
+      - name: Stage app
         run: |
           mkdir -p dist/Payload
           cp -R ios/build/iphoneos/Release-iphoneos/MikuFlick.app dist/Payload/
-          cd dist && zip -qry MikuFlick-unsigned.ipa Payload
+      - name: Release version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          BUILD: ${{ github.run_number }}
+        run: |
+          version=$(printf '%s' "$TAG" | sed -E 's/^[^0-9]*//')   # v0.4.0 -> 0.4.0
+          [ -n "$version" ] || { echo "tag $TAG has no version number"; exit 1; }
+          plist=dist/Payload/MikuFlick.app/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" -c "Set :CFBundleVersion $BUILD" "$plist"
+      - name: Package IPA
+        run: cd dist && zip -qry MikuFlick-unsigned.ipa Payload
       - uses: actions/upload-artifact@v4
         with:
           name: MikuFlick-ios-unsigned-${{ github.sha }}
           path: dist/MikuFlick-unsigned.ipa
           if-no-files-found: error
+      - name: Upload to the release with an AltSource
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          NOTES: ${{ github.event.release.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          mv dist/MikuFlick-unsigned.ipa dist/MikuFlick.ipa
+          sh ios/altsource.sh dist/Payload/MikuFlick.app dist/MikuFlick.ipa \
+            "https://github.com/$REPO/releases/download/$TAG/MikuFlick.ipa" dist/altsource.json
+          gh release upload "$TAG" dist/MikuFlick.ipa dist/altsource.json --clobber -R "$REPO"
 
   android:
     name: Android (debug APK)
