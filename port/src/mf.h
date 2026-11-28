@@ -16,7 +16,7 @@
 #define TICKS_PER_SEC 30          /* gameplay tick rate (PlayCnt) */
 #define NUM_DIFF 5                /* Easy Normal Hard Extreme BreakTheLimit */
 #define DIFF_BREAK 4
-#define MAX_SONGS 32
+#define MAX_SONGS 128           /* 11 built-in + up to 63 DLC (21 packs) and room to spare */
 #define NUM_KANA 190
 #define KANA_BASE 0x3041          /* s_HiraganaFirstIdx */
 #define NUM_KEYS 10
@@ -30,7 +30,9 @@ enum { SND_COOL_SP = 0, SND_HIT = 1, SND_SAD = 2, SND_INTERLUDE = 3, SND_DECIDE 
 
 /* scene ids (SceneManager) */
 enum { SCENE_BOOT = 0, SCENE_TITLE = 1, SCENE_GAME = 2, SCENE_SELECT = 3, SCENE_PV = 4, SCENE_OPTION = 6,
-       SCENE_RESULT = 8, SCENE_QUIT = 99 };
+       SCENE_RESULT = 8, SCENE_DLC = 13, SCENE_QUIT = 99 };
+/* SCENE_DLC: port DLC page in the title SHOP slot (Linux: shown by the options screen; iOS and Android:
+   a native screen over the game, opened by main.c) */
 /* ending.c: SceneEnding (credits roll) and ScenePreEnding (ending movie) */
 enum { SCENE_ENDING = 9, SCENE_PREENDING = 14 };
 #define IS_ENDING_SCENE(s) ((s) == SCENE_ENDING || (s) == SCENE_PREENDING)
@@ -44,7 +46,11 @@ int utf8_decode(const char *s, uint32_t *cp); /* returns bytes consumed, 0 at en
 /* ---------------- gamedata.c ---------------- */
 typedef struct {
     char preview[64], movie[64], art_atlas[64], title[160];
+    char artist[160];        /* DLC only (MusicData m_Artist) */
     int bpm, stars[4];
+    int id;                  /* MusicData m_Index: 0..10 built-in, DLC ids from the original save */
+    int pack;                /* MusicPack id, 0 = built-in */
+    int art_index;           /* frame set in the art sheet (SetArtWorkIndex): art_/logo_00_01_0<art_index> */
 } SongInfo;
 
 typedef struct { int key, dir, sub, tex, x, y; } KanaInfo;
@@ -53,6 +59,7 @@ typedef struct { int sx, sy, px, py; } BoardKey;
 typedef struct {
     SongInfo songs[MAX_SONGS];
     int nsongs;
+    int nbase;                      /* built-in songs: songs[0..nbase), DLC songs follow */
     KanaInfo kana[NUM_KANA];
     BoardKey board[NUM_KEYS];       /* src rect of key face + TOP-LEFT screen position */
     int guide[NUM_KEYS][5];         /* e_GuideCharPictIdx: fgcharacter index {centre,up,right,down,left}, -1 none */
@@ -70,21 +77,7 @@ typedef struct {
 bool gamedata_load(GameData *gd, const char *path);
 
 /* ---------------- bplist.c ---------------- */
-typedef enum { BP_NULL, BP_BOOL, BP_INT, BP_REAL, BP_STR, BP_DATA, BP_ARRAY, BP_DICT } BpType;
-typedef struct BpNode {
-    BpType type;
-    int64_t i;
-    double r;
-    char *s;                 /* BP_STR (UTF-8), BP_DATA (raw) */
-    size_t n;                /* bytes for STR/DATA, items for ARRAY/DICT */
-    struct BpNode **items;   /* ARRAY values, DICT values */
-    char **keys;             /* DICT keys */
-} BpNode;
-
-BpNode *bp_parse(const uint8_t *data, size_t len);
-void bp_free(BpNode *n);
-BpNode *bp_get(const BpNode *dict, const char *key);
-double bp_num(const BpNode *n);
+#include "bplist.h"
 
 /* ---------------- atlas.c ---------------- */
 typedef struct { char name[64]; SDL_Rect r; } Frame;
@@ -165,12 +158,21 @@ typedef void (*IpaProgress)(void *ud, double frac, const char *file);
 bool ipa_import(int fd, const char *dir, IpaProgress cb, void *ud, char *err, size_t errlen);
 
 /* ---------------- android.c (Android only): native pages over the game ---------------- */
-enum { ANDROID_PAGE_IMPORT = 1 };
+enum { ANDROID_PAGE_IMPORT = 1, ANDROID_PAGE_DLC = 2 };
 enum { ANDROID_IMPORT_PROMPT, ANDROID_IMPORT_RUNNING, ANDROID_IMPORT_FAILED };   /* importState phases */
 bool android_page_show(int kind, int mode, const char *files_dir);
 void android_page_hide(void);
 bool android_page_action(char *buf, size_t cap);   /* the page's next action, false if none */
 void android_import_state(int phase, double frac, const char *file, const char *err);
+void android_dlc_state(const char *state, size_t len);   /* DlcPage.java setState: see main.c android_dlc_page */
+
+/* Random access to a zip (ipa.c reads the IPA through it; for now a local file). read returns false
+   on any error; it may be called from a worker thread. */
+typedef struct ZipSrc {
+    bool (*read)(void *ud, uint64_t off, void *dst, size_t n);
+    void *ud;
+    uint64_t size;
+} ZipSrc;
 
 /* ---------------- view.c ---------------- */
 /* Scenes draw into a 640x960 target between view_begin and view_present, which shows
@@ -213,12 +215,18 @@ typedef struct {
     bool flower;             /* KEYBOARD: flick "flower" guide around a held key */
     bool guide_panel;        /* KEYBOARD: guide cursor/arrow on the next key */
     bool pause_button;       /* DISPLAY PAUSE: draw the in-game pause button (TouchPauseEnable) */
+    bool show_dlc;           /* port-only DLC page (title SHOP slot): list the DLC songs in music/PV select */
     /* PV viewer (ScenePVSelect / ScenePVView): set by the UI before starting playback */
     bool pv_mode, pv_lyrics, pv_karaoke, pv_loop, pv_shuffle;
     bool autoplay;           /* debug: perfect autoplay */
     bool autoplay_input;     /* debug: autoplay through synthetic keyboard/mouse events */
     int start_song, start_diff;   /* -1 = go through menus */
 } Options;
+
+/* songs shown in music/PV select: DLC songs (after the built-in ones) only while show_dlc is on */
+static inline int visible_songs(const GameData *gd, const Options *o) {
+    return o->show_dlc || gd->nbase <= 0 ? gd->nsongs : gd->nbase;
+}
 
 /* ---------------- save.c ---------------- */
 typedef struct { int score, rank, combo, cleared; } Record;
@@ -232,15 +240,21 @@ typedef struct {
     int flick_success[NUM_KEYS][NUM_FLICK_DIRS];
 } RecordEx;
 typedef struct {
+    /* by GameData song index; in the file by built-in song number or, for DLC songs, movie name */
     Record rec[MAX_SONGS][NUM_DIFF];
     RecordEx recx[MAX_SONGS][NUM_DIFF];   /* RECORDS */
     int timing[MAX_SONGS];   /* per-song INPUT TIMING (MusicData GetInputTiming), set in the pause menu */
+    const GameData *gd;      /* song ids / movies for the file */
+    char *keep;              /* lines of songs not installed now (other DLC set), written back as is */
+    size_t keep_len;
     bool has_opt;            /* options stored in the save file */
     Options opt;             /* only the persistent fields are used */
     char path[1024];
 } SaveData;
-void save_load(SaveData *s, const char *dir);
+void save_load(SaveData *s, const char *dir, const GameData *gd);
 void save_write(const SaveData *s);
+/* the song field of a save line for song index i: built-in song number or DLC movie name (NULL: none) */
+const char *save_song_key(const SaveData *s, int i, char *buf, size_t cap);
 
 /* ---------------- game.c ---------------- */
 typedef struct Game Game;
@@ -308,6 +322,7 @@ void digits_draw(SDL_Renderer *ren, const Atlas *a, const char *prefix, long val
 typedef struct UiState UiState;
 UiState *ui_create(SDL_Renderer *ren, Assets *as, const GameData *gd, SaveData *save, Options *opt);
 void ui_destroy(UiState *u);
+void ui_songs_changed(UiState *u);   /* after an in-game import: song list and art files may differ */
 void ui_enter(UiState *u, int scene, const GameResult *res);
 /* returns next scene id or -1 to stay; on SCENE_GAME sets song and diff */
 int ui_event(UiState *u, const SDL_Event *e, int *song, int *diff);

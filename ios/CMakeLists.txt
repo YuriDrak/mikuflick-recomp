@@ -39,13 +39,13 @@ set(font_resources "${port}/fonts/MPLUS1p-Bold.ttf" "${port}/fonts/OFL.txt")
 set_source_files_properties(${font_resources} PROPERTIES MACOSX_PACKAGE_LOCATION Resources/fonts)
 # app icon: the iOS version of the Android launcher icon (App/AppIcon.svg), compiled by actool
 set(app_assets "${CMAKE_CURRENT_SOURCE_DIR}/App/Assets.xcassets")
-add_executable(MikuFlick MACOSX_BUNDLE ${sources} App/Platform.m App/ImportViewController.m App/Scene.m ${font_resources}
+add_executable(MikuFlick MACOSX_BUNDLE ${sources} App/Platform.m App/ImportViewController.m App/DlcViewController.m App/Scene.m ${font_resources}
     ${app_assets})
 target_compile_features(MikuFlick PRIVATE c_std_11)
 target_compile_options(MikuFlick PRIVATE -Wall -Wextra -Wno-unused-parameter)   # as port/Makefile
 set_source_files_properties("${port}/src/pl_mpeg_impl.c" PROPERTIES COMPILE_OPTIONS -Wno-shorten-64-to-32)   # vendored
 target_compile_definitions(MikuFlick PRIVATE MF_IOS)
-set_source_files_properties(App/Platform.m App/ImportViewController.m App/Scene.m PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+set_source_files_properties(App/Platform.m App/ImportViewController.m App/DlcViewController.m App/Scene.m PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 target_include_directories(MikuFlick PRIVATE App "${port}/third_party")
 target_link_libraries(MikuFlick PRIVATE SDL2_image::SDL2_image-static
     SDL2_ttf::SDL2_ttf-static SDL2::SDL2-static "-framework UniformTypeIdentifiers")

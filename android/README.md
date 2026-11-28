@@ -107,7 +107,7 @@ file providers. Not measured yet: audio latency on different phones.
 | `app/build.gradle` | AGP 8.7 app module: SDK levels, ABIs, CMake, SDL Java sources, font assets |
 | `app/jni/CMakeLists.txt` | builds SDL2, SDL2_image (stb PNG), SDL2_ttf (bundled FreeType) and `libmain.so` |
 | `app/src/main/java/.../MikuFlickActivity.java` | `SDLActivity` subclass: library list, intent arguments, native pages over the game (`port/src/android.c`), system file picker for the IPA (fd passed to `port/src/ipa.c`) |
-| `app/src/main/java/.../NativePage.java`, `ImportPage.java` | native screens of plain framework views (device theme, Android 7+): the IPA import screen, the counterpart of `ios/App/ImportViewController.m` |
+| `app/src/main/java/.../NativePage.java`, `ImportPage.java`, `DlcPage.java` | native screens of plain framework views (device theme, Android 7+): the IPA import screen and the DLC page, the counterparts of `ios/App/ImportViewController.m` and `DlcViewController.m` |
 | `app/src/main/res/drawable/` | Material icons (Apache 2.0) for those screens |
 | `app/src/main/AndroidManifest.xml` | portrait, fullscreen, no permissions |
 | `../ios/` | iOS port: CMake/Makefile, native Files picker, scene-based lifecycle |

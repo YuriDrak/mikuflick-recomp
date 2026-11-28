@@ -15,12 +15,15 @@ import org.libsdl.app.SDLActivity;
  * SDL's activity running the C port (libmain.so).
  *
  * Native pages (NativePage): screens of plain Android views over the game, driven by the native
- * code (port/src/android.c): showPage() / hidePage() / importState() from the SDL thread, and
+ * code (port/src/android.c): showPage() / hidePage() / importState() / dlcState() from the SDL thread, and
  * takeAction(), which the native code polls for the page's taps. While a page is up the game
  * draws nothing, so scrolling and animations run at the display's rate without competing with it.
  *
  * Game data import (ImportPage): the page opens the system file picker and passes the chosen
  * file's descriptor to the native code ("fd N"), which reads the zip from it (port/src/ipa.c).
+ *
+ * DLC page (DlcPage): the title SHOP slot; the SHOW DLC SONGS switch, the installed counts and
+ * IMPORT IPA (an IPA that includes the DLC packs).
  *
  * Command-line flags of the Linux build can be passed for testing:
  *   adb shell am start -n io.github.yuridrak.mikuflick/.MikuFlickActivity --es args "--song 6 --diff 3 --autoplay"
@@ -28,7 +31,7 @@ import org.libsdl.app.SDLActivity;
 public class MikuFlickActivity extends SDLActivity {
     private static final int REQUEST_IPA = 0x1B4;
     private static final String TAG = "mikuflick";
-    static final int PAGE_IMPORT = 1;   /* android.c ANDROID_PAGE_* */
+    static final int PAGE_IMPORT = 1, PAGE_DLC = 2;   /* android.c ANDROID_PAGE_* */
 
     private final ConcurrentLinkedQueue<String> pageActions = new ConcurrentLinkedQueue<>();
     private NativePage page;     /* UI thread only */
@@ -54,7 +57,7 @@ public class MikuFlickActivity extends SDLActivity {
         pageActions.clear();
         runOnUiThread(() -> {
             if (page != null) page.detach(false);
-            page = kind == PAGE_IMPORT ? new ImportPage(this, mode) : null;
+            page = kind == PAGE_IMPORT ? new ImportPage(this, mode) : kind == PAGE_DLC ? new DlcPage(this) : null;
             if (page != null) page.attach();
         });
     }
@@ -81,6 +84,14 @@ public class MikuFlickActivity extends SDLActivity {
         String f = new String(file, StandardCharsets.UTF_8), e = new String(err, StandardCharsets.UTF_8);
         runOnUiThread(() -> {
             if (page instanceof ImportPage) ((ImportPage) page).setState(phase, permille, f, e);
+        });
+    }
+
+    /** Called from native code (SDL thread): DLC page state (main.c android_dlc_page). */
+    public void dlcState(byte[] state) {
+        String s = new String(state, StandardCharsets.UTF_8);
+        runOnUiThread(() -> {
+            if (page instanceof DlcPage) ((DlcPage) page).setState(s);
         });
     }
 

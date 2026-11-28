@@ -12,7 +12,7 @@ This is a clean-room **reimplementation** of the game logic in portable C, drive
 | CRI Mana (`criManaPlayer_*`) | USM video + 2 ADX tracks + cue points | **Own USM chunk reader** (`port/src/usm.c`) for cue points and the @SFV/@SFA stream payloads, **own ADX decoder** and **pl_mpeg** (vendored, MIT) for the MPEG-1 video (`port/src/media.c`). Until the Android port this used FFmpeg |
 | CRI Atom / AudioToolbox / OpenAL / AVFoundation | SFX + BGM (`.caf` IMA4), preview loops (`.adx`) | own ADX and Apple IMA4 decoders to S16 PCM at load, mixed by an **SDL2 audio callback** (own mixer) |
 | Foundation `NSUserDefaults` / `NSKeyedArchiver` (`MikuFlick2.dat`) | save data | plain text save file in `$XDG_DATA_HOME/mikuflick-port/save.txt` (or `--data DIR`) |
-| GameKit, StoreKit, Twitter, Accounts, AdSupport, NoahSDK, Reachability, MessageUI | leaderboards, IAP DLC, tweeting, ads | **dropped**. The DLC servers are gone, and the bundled 11 songs are the playable set. The RESULTS screen's LEADERBOARD / ACHIEVEMENTS buttons show a port note instead |
+| GameKit, StoreKit, Twitter, Accounts, AdSupport, NoahSDK, Reachability, MessageUI | leaderboards, IAP DLC, tweeting, ads | **dropped**. The DLC servers are gone; the bundled 11 songs are always playable, and DLC songs only from an IPA that ships the game's data container (`dlc.c`, re_notes §5.14), imported with it. The RESULTS screen's LEADERBOARD / ACHIEVEMENTS buttons show a port note instead |
 | `NSLocale preferredLanguages` (`IsJapanese()`) | ja/en help and option text | `SDL_GetPreferredLocales()`; `MIKUFLICK_LANG=ja\|en` overrides it |
 | `NSString` cue parsing, `NSArray` note lists | gameplay containers | C arrays |
 
@@ -41,7 +41,7 @@ The `ending` lines are optional: they are written only when all 76 rows decode, 
 | `src/bplist.c` | bplist00 reader (atlases) |
 | `src/atlas.c` | PNG textures (SDL_image) + atlas frame lookup + sprite drawing |
 | `src/ipa.c` | in-app IPA importer: zip central directory, inflate + CRC-32, app-version check, selective extraction, progress callback |
-| `src/android.c` | Android only: JNI glue for the native pages over the game (import screen, `android/.../ImportPage.java`) |
+| `src/android.c` | Android only: JNI glue for the native pages over the game (import screen, DLC page: `android/.../ImportPage.java`, `DlcPage.java`) |
 | `src/mfx.c` | game tables read from the user's `MikuFlick2` binary (shared by `tools/mfextract` and `ipa.c`) |
 | `src/usm.c` | USM chunk walker + `@UTF` reader → cue list |
 | `src/media.c` | own ADX + IMA4 decoders: whole-file audio decode to S16 stereo 44.1 kHz (per stream), streaming MPEG-1 video (pl_mpeg, `src/pl_mpeg_impl.c`) |
@@ -80,7 +80,7 @@ Touches in the original are UIKit points (320×480); the port converts its 640×
 
 ## 6. Deliberate deviations
 
-* No network features (shop, Twitter, Game Center, ads, info feed) and no in-app purchases. On the RESULTS screen (title crown), LEADERBOARD and ACHIEVEMENTS switch to the screen's dormant "no function" mode with port text ("Game Center is not available."); the original's Japanese message is game text and is not copied.
+* No network features (no shop, Twitter, Game Center, ads, info feed) and no in-app purchases. On the RESULTS screen (title crown), LEADERBOARD and ACHIEVEMENTS switch to the screen's dormant "no function" mode with port text ("Game Center is not available."); the original's Japanese message is game text and is not copied.
 * Replay recording (REPLAY on the result screen), Twitter, the collection, the PV playlist editor, the help tutorial-movie button and the help scroll handle are not ported. The options screen stores its settings in the save file; command-line flags (`--offset`, `--volume`, `--se-volume`, `--no-fail-sound`) override them for a session (`--offset` is then not saved).
 * **Everything is unlocked** from the start. So the ENDING button on OPTIONS → CREDITS is always shown, while the original's first-clear trigger (all of songs 0–8 cleared on Normal while song 9 is locked → credits → ending movie → 初音ミクの激唱 Extreme) can never fire; the movie tail is implemented and reachable with `--start-scene ending|movie`. The credits roll and movie can't be skipped, as in the original.
 * **INPUT TIMING** is in the pause menu, per song, −10…+10, as in the original (an earlier port version had one global value on the DISPLAY page; old saves are migrated to every song). `Left`/`Right` while paused also step it.
@@ -120,6 +120,7 @@ Headless checks (`SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy`, real-time au
 | `mfextract` with the ending table | 76 `ending` lines, every other line unchanged | 76 lines; the rest identical to the previous `gamedata.txt`; with an old `gamedata.txt` the ENDING button is hidden and a log line asks to rerun setup |
 | OPTIONS → CREDITS → ENDING round trip, headless | roll ≈ 100.7 s, hold, BGM fade, back to CREDITS through the loading screen | ran end to end in one ~117 s run; `--start-scene movie` starts 激唱 Extreme ≈ 9.5 s in |
 | PV view, scripted mouse drags | tap does nothing, > 320 px drag changes PV, pause button, RESUME, RETRY fade-in, MUSIC SELECT | as expected (screenshots); a natural movie end with LOOP/SHUFFLE was not run headless (same code path as a swipe reload) |
+| DLC (branch `dlc-support`, on upstream main, desktop build) | DLC records keyed by movie; built-in songs unchanged; lines of songs not installed kept | カンタレラ Extreme autoplay 117,005 PERFECT, saved as `rec kantarera …` / `recx kantarera …` and 10 `flk` lines; `rec 0` / `timing 0` and an unknown-movie line kept; magnet Extreme `--autoplay` / `--autoplay-input` still 115,616 |
 | Movie deblocking, カンタレラ 170 s / 183 s frames with and without `MF_NO_DEBLOCK` | tiles in skin and floor gone, edges and texture kept | as expected (block steps of the face close-up removed; stair-stepped hair edges remain, that detail is not in the stream) |
 
 Caveat: if three instances share the CPU under the software renderer, frame times exceed the 33 ms tick and synthetic presses land late. The game samples input once per frame (the original runs at 30 fps), so play quality depends on the frame rate. With a GPU renderer and vsync this is not an issue.

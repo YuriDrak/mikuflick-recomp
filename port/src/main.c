@@ -16,6 +16,11 @@
 #ifdef MF_IOS
 #include "Platform.h"
 #endif
+#if defined(MF_IOS) || defined(__ANDROID__)
+#define MF_NATIVE_DLC 1   /* the DLC page is a native screen (ios/App/DlcViewController.m, android/.../DlcPage.java) */
+#else
+#define MF_NATIVE_DLC 0
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -185,6 +190,9 @@ static void script_mouse(SDL_Renderer *ren, Uint32 type, int lx, int ly) {
 }
 
 
+/* import screen: first start, outdated data (NOT NOW), or opened from the DLC page (BACK) */
+enum { IMPORT_NEEDED, IMPORT_UPDATE, IMPORT_DLC };
+
 #if defined(__ANDROID__) || defined(MF_IOS)
 /* the game's main files are there (a quick check before loading everything) */
 static bool data_ready(const char *appdir) {
@@ -212,8 +220,9 @@ static bool data_current(const char *appdir, const GameData *gd) {
 #endif
 
 #ifdef MF_IOS
-static bool import_screen(SDL_Renderer *ren, const char *files_dir, bool update) {
-    return ios_import_screen(SDL_RenderGetWindow(ren), files_dir, update);
+static bool import_screen(SDL_Renderer *ren, const char *files_dir, int mode) {
+    return ios_import_screen(SDL_RenderGetWindow(ren), files_dir,
+                             mode == IMPORT_UPDATE ? IOS_IMPORT_UPDATE : mode == IMPORT_DLC ? IOS_IMPORT_DLC : IOS_IMPORT_NEEDED);
 }
 #elif defined(__ANDROID__)
 typedef struct {
@@ -250,11 +259,12 @@ static int SDLCALL import_thread(void *ud) {
 }
 
 /* Shown while the user's game data is missing: imports their own IPA in the app.
-   Returns true once an import has succeeded, false if the player quits. update: the data is
-   there but outdated (data_current), NOT NOW keeps it and returns false without importing.
+   Returns true once an import has succeeded, false if the player quits. IMPORT_UPDATE: the data is
+   there but outdated (data_current), NOT NOW keeps it; IMPORT_DLC: opened from the DLC page (an IPA
+   with the DLC packs), Cancel. Both return false without importing.
    The page is native (ImportPage.java, through android.c): it picks the file and hands over its
    descriptor ("fd N"); the import runs here on a worker thread and the page shows its progress. */
-static bool import_screen(SDL_Renderer *ren, const char *files_dir, bool update) {
+static bool import_screen(SDL_Renderer *ren, const char *files_dir, int mode) {
     (void)ren;
     ImportJob *job = calloc(1, sizeof *job);   /* heap: a detached worker may outlive this screen */
     if (!job || !(job->mu = SDL_CreateMutex())) { free(job); return false; }
@@ -264,7 +274,7 @@ static bool import_screen(SDL_Renderer *ren, const char *files_dir, bool update)
     bool result = false, importing = false;
     int shown_permille = -1;
     char shown_file[96] = "";
-    if (!android_page_show(ANDROID_PAGE_IMPORT, update ? 1 : 0, files_dir)) {
+    if (!android_page_show(ANDROID_PAGE_IMPORT, mode == IMPORT_UPDATE ? 1 : mode == IMPORT_DLC ? 2 : 0, files_dir)) {
         log_msg("import: the import page could not be shown");
         goto done;
     }
@@ -340,6 +350,126 @@ static void cli_progress(void *ud, double frac, const char *file) {
     if (frac >= 1.0) fputc('\n', stderr);
 }
 
+/* ---------------- song list changes (imports from the DLC page) ---------------- */
+#if defined(__ANDROID__) || defined(MF_IOS)
+typedef struct {
+    GameData *gd;
+    SaveData *save;
+    UiState *ui;
+    Options *opt;
+    int *song;
+    const char *datadir, *gamedata;
+} SongCtx;
+
+/* the song list in gd changed: re-key the save records (options kept) and reset the menus */
+static void songs_changed(SongCtx *c) {
+    Options keep = c->save->opt;
+    bool had_opt = c->save->has_opt;
+    save_load(c->save, c->datadir, c->gd);
+    c->save->opt = keep;
+    c->save->has_opt = had_opt;
+    ui_songs_changed(c->ui);
+    *c->song = 0;
+}
+
+/* DLC page: import a whole IPA with DLC. False if the player quit (broken data, import refused). */
+static bool dlc_import(SDL_Renderer *ren, const char *files_dir, const char *appdir, SongCtx *c) {
+    save_write(c->save);
+    if (!import_screen(ren, files_dir, IMPORT_DLC)) return true;   /* cancelled */
+    while (!(data_ready(appdir) && gamedata_load(c->gd, c->gamedata)))   /* broken result: full import */
+        if (!import_screen(ren, files_dir, IMPORT_NEEDED)) return false;
+    songs_changed(c);
+    return true;
+}
+
+/* installed DLC: packs and songs */
+static void dlc_counts(const SongCtx *c, int *packs, int *songs) {
+    int n = 0;
+    for (int i = c->gd->nbase; i < c->gd->nsongs; i++) {
+        bool seen = false;
+        for (int k = c->gd->nbase; k < i && !seen; k++) seen = c->gd->songs[k].pack == c->gd->songs[i].pack;
+        n += !seen;
+    }
+    *packs = n;
+    *songs = c->gd->nsongs - c->gd->nbase;
+}
+
+static void dlc_set_show(SongCtx *c, bool on) {
+    if (on && c->gd->nsongs <= c->gd->nbase) on = false;   /* nothing installed */
+    if (on == c->opt->show_dlc) return;
+    c->opt->show_dlc = on;
+    c->save->opt = *c->opt;
+    c->save->has_opt = true;
+    save_write(c->save);
+}
+#endif
+
+#ifdef MF_IOS
+/* native DLC page (ios/App/DlcViewController.m) */
+static void ios_dlc_tick(IosDlcPage *p) {
+    SongCtx *c = p->ud;
+    dlc_counts(c, &p->installed_packs, &p->installed_songs);
+    dlc_set_show(c, p->show_dlc);
+}
+
+/* true: the player asked to import a whole IPA with DLC */
+static bool ios_dlc_page(SDL_Window *win, SongCtx *c) {
+    IosDlcPage p = {.ud = c, .show_dlc = c->opt->show_dlc, .tick = ios_dlc_tick};
+    ios_dlc_tick(&p);
+    return ios_dlc_screen(win, &p);
+}
+#endif
+
+#ifdef __ANDROID__
+/* Native DLC page (android/.../DlcPage.java, through android.c), the counterpart of the iOS one: the
+   page shows the state below and sends the player's actions; the work runs here on the SDL thread.
+   State: "S <show_dlc> <installed_packs> <installed_songs>", fields separated by tabs.
+   Actions: later, import, show 0|1. */
+static size_t dlc_page_state(const SongCtx *c, char *buf, size_t cap) {
+    int packs, songs;
+    dlc_counts(c, &packs, &songs);
+    int n = snprintf(buf, cap, "S\t%d\t%d\t%d\n", c->opt->show_dlc, packs, songs);
+    return n < 0 ? 0 : (size_t)n < cap ? (size_t)n : cap - 1;
+}
+
+/* true: the player asked to import a whole IPA with DLC */
+static bool android_dlc_page(SongCtx *c) {
+    char state[64], sent[64] = "";
+    bool import = false;
+    if (!android_page_show(ANDROID_PAGE_DLC, 0, NULL)) {
+        log_msg("dlc: the DLC page could not be shown");
+        return false;
+    }
+    for (;;) {
+        SDL_Event e;
+        bool quit = false;
+        while (SDL_PollEvent(&e))
+            if (e.type == SDL_QUIT || e.type == SDL_APP_TERMINATING) quit = true;
+        if (quit) {   /* for the main loop */
+            SDL_Event q = {.type = SDL_QUIT};
+            SDL_PushEvent(&q);
+            break;
+        }
+        char act[64];
+        bool done = false;
+        while (!done && android_page_action(act, sizeof act)) {
+            if (!strcmp(act, "later")) done = true;
+            else if (!strcmp(act, "import")) import = done = true;
+            else if (!strncmp(act, "show ", 5)) dlc_set_show(c, act[5] == '1');
+        }
+        if (done) break;
+        size_t n = dlc_page_state(c, state, sizeof state);
+        if (strcmp(state, sent)) {   /* only when it changed */
+            android_dlc_state(state, n);
+            snprintf(sent, sizeof sent, "%s", state);
+        }
+        SDL_Delay(16);   /* nothing to draw: the page is on top */
+    }
+    android_page_hide();
+    return import;
+}
+#endif
+
 static void usage(void) {
     puts("mikuflick - Linux port of Miku Flick/02 (requires your own extracted IPA)\n"
          "  --app DIR          extracted MikuFlick2.app (default extracted/ipa/Payload/MikuFlick2.app)\n"
@@ -361,7 +491,7 @@ int main(int argc, char **argv) {
     const char *gamedata = "port/data/gamedata.txt";
     char datadir[1024] = "";
     Options opt = {.input_timing = 0, .bgm_volume = 1.0f, .se_volume = 1.0f, .fail_sound = true, .left_hand = false,
-                   .keyboard = 0, .flower = true, .guide_panel = true, .pause_button = true, .autoplay = false, .autoplay_input = false,
+                   .keyboard = 0, .flower = true, .guide_panel = true, .pause_button = true, .show_dlc = true, .autoplay = false, .autoplay_input = false,
                    .start_song = -1, .start_diff = 1};
     bool cli_timing = false, cli_bgm = false, cli_se = false, cli_fail = false;
     bool exit_after = false, fullscreen = false;
@@ -470,6 +600,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(v, "credits")) { start_scene = SCENE_OPTION; start_credits = true; }
             if (!strcmp(v, "scores")) start_scene = SCENE_SCORE;   /* RECORDS: RESULTS menu / RECORDS screen */
             if (!strcmp(v, "records")) start_scene = SCENE_RECORD;
+            if (!strcmp(v, "dlc")) start_scene = SCENE_DLC;   /* port DLC page */
 #if defined(__ANDROID__) || defined(MF_IOS)
             if (!strcmp(v, "import")) start_import = 0;
             else if (!strcmp(v, "import-update")) start_import = 1;
@@ -528,9 +659,9 @@ int main(int argc, char **argv) {
 #if defined(__ANDROID__) || defined(MF_IOS)
     /* no data yet (first start): import the player's own IPA inside the app */
     while (!(data_ready(appdir) && gamedata_load(&gd, gamedata)))
-        if (!import_screen(ren, mobile_files, false)) return 1;
-    if (!data_current(appdir, &gd) && import_screen(ren, mobile_files, true) && !gamedata_load(&gd, gamedata)) return 1;
-    if (start_import >= 0 && import_screen(ren, mobile_files, start_import == 1) && !gamedata_load(&gd, gamedata)) return 1;   /* testing */
+        if (!import_screen(ren, mobile_files, IMPORT_NEEDED)) return 1;
+    if (!data_current(appdir, &gd) && import_screen(ren, mobile_files, IMPORT_UPDATE) && !gamedata_load(&gd, gamedata)) return 1;
+    if (start_import >= 0 && import_screen(ren, mobile_files, start_import ? IMPORT_UPDATE : IMPORT_NEEDED) && !gamedata_load(&gd, gamedata)) return 1;   /* testing */
     if (opt.start_song >= gd.nsongs) opt.start_song = -1;
 #endif
 
@@ -556,13 +687,13 @@ int main(int argc, char **argv) {
         log_msg("asset loading failed - is --app pointing at the extracted MikuFlick2.app?");
         assets_free(&as);
 #if defined(__ANDROID__) || defined(MF_IOS)
-        if (!import_screen(ren, mobile_files, false) || !gamedata_load(&gd, gamedata)) return 1;   /* incomplete data: re-import */
+        if (!import_screen(ren, mobile_files, IMPORT_NEEDED) || !gamedata_load(&gd, gamedata)) return 1;   /* incomplete data: re-import */
 #else
         return 1;
 #endif
     }
     static SaveData save;
-    save_load(&save, datadir);
+    save_load(&save, datadir, &gd);
     if (save.has_opt) {   /* options saved from the OPTIONS screen; command-line flags win */
         if (!cli_bgm) opt.bgm_volume = save.opt.bgm_volume;
         if (!cli_se) opt.se_volume = save.opt.se_volume;
@@ -572,6 +703,7 @@ int main(int argc, char **argv) {
         opt.flower = save.opt.flower;
         opt.guide_panel = save.opt.guide_panel;
         opt.pause_button = save.opt.pause_button;
+        opt.show_dlc = save.opt.show_dlc;
         mixer_set_master(1.0f, opt.se_volume);
         mixer_set_bgm(opt.bgm_volume);
     }
@@ -581,6 +713,10 @@ int main(int argc, char **argv) {
     Game *game = NULL;
 
     int scene = SCENE_BOOT, song = 0, diff = 1;
+    int first_next = -1;   /* scene to switch to on the first frame */
+#if MF_NATIVE_DLC
+    SongCtx songs = {&gd, &save, ui, &opt, &song, datadir, gamedata};
+#endif
     if (opt.start_song >= 0) { scene = SCENE_GAME; song = opt.start_song; diff = opt.start_diff; }
     else if (start_scene == SCENE_RESULT) { /* testing: sample result screen */
         GameResult demo = {.song = 6, .diff = 1, .counts = {0, 0, 1, 0, 26, 56}, .total_notes = 83, .max_combo = 62,
@@ -592,6 +728,8 @@ int main(int argc, char **argv) {
         ui_enter(ui, start_credits ? SCENE_ENDING : scene, NULL);
         if (start_credits) ui_enter(ui, SCENE_OPTION, NULL);   /* as if back from the ending: CREDITS */
         else ending_enter(ending, scene, SCENE_TITLE);
+    } else if (MF_NATIVE_DLC && start_scene == SCENE_DLC) {   /* iOS, Android: the native page opens over the title */
+        scene = SCENE_TITLE; ui_enter(ui, scene, NULL); first_next = SCENE_DLC;
     } else { scene = start_scene; ui_enter(ui, scene, NULL); if (scene == SCENE_BOOT) scene = SCENE_TITLE; }
     if (IS_RECORDS_SCENE(scene)) records_enter(records, scene, SCENE_TITLE);   /* RECORDS: --start-scene scores|records */
     Uint32 scene_ms = SDL_GetTicks();
@@ -652,7 +790,8 @@ int main(int argc, char **argv) {
             if (f >= 1.0f) { script_mouse(ren, SDL_MOUSEBUTTONUP, x, y); drag_i = -1; }
         }
         SDL_Event e;
-        int next = -1;
+        int next = first_next;
+        first_next = -1;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT || e.type == SDL_APP_TERMINATING) { next = SCENE_QUIT; break; }
             if (e.type == SDL_APP_WILLENTERBACKGROUND) {   /* Android/iOS: the process may be killed while away */
@@ -761,6 +900,17 @@ int main(int argc, char **argv) {
             if (n >= 0) next = n;
         }
 
+#if MF_NATIVE_DLC
+        while (next == SCENE_DLC) {   /* native DLC page; its IMPORT comes back to it */
+#ifdef MF_IOS
+            bool import = ios_dlc_page(win, &songs);
+#else
+            bool import = android_dlc_page(&songs);
+#endif
+            if (!import) next = scene == SCENE_TITLE ? -1 : SCENE_TITLE;   /* the title stays as it was */
+            else if (!dlc_import(ren, mobile_files, appdir, &songs)) next = SCENE_QUIT;
+        }
+#endif
         if (next == SCENE_QUIT) { scene = SCENE_QUIT; continue; }
         if (next >= 0) trans_start(&tr, scene, next, NULL);   /* NextScene: fade, switch at the peak */
 

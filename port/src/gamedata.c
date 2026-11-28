@@ -17,12 +17,37 @@ static int read_ints(const char *s, int *out, int n) {
     return k;
 }
 
+/* "dlc <id> <pack> <art_index> <title_break> <preview> <movie> <art_atlas> <bpm> <e> <n> <h> <x>\t<title>\t<artist>"
+   (dlc.c). title_break (m_TitleLineBreadIdx) is read but unused: the select screen shows the logo art. */
+static bool parse_dlc(const char *s, SongInfo *si) {
+    int id, pack, art, brk, bpm, st[4], used = 0;
+    char pv[64], mv[64], atlas[64];
+    if (sscanf(s, "%d %d %d %d %63s %63s %63s %d %d %d %d %d%n", &id, &pack, &art, &brk, pv, mv, atlas, &bpm, &st[0], &st[1],
+               &st[2], &st[3], &used) != 12 || s[used] != '\t' || id < 0 || pack <= 0)
+        return false;
+    memset(si, 0, sizeof *si);
+    si->id = id;
+    si->pack = pack;
+    si->art_index = art >= 0 && art < 3 ? art : 0;
+    snprintf(si->preview, sizeof si->preview, "%s", strcmp(pv, "-") ? pv : "");
+    snprintf(si->movie, sizeof si->movie, "%s", mv);
+    snprintf(si->art_atlas, sizeof si->art_atlas, "%s", atlas);
+    si->bpm = bpm;
+    for (int d = 0; d < 4; d++) si->stars[d] = st[d] < 0 ? 0 : st[d] > 9 ? 9 : st[d];
+    const char *t = s + used + 1, *tab = strchr(t, '\t');
+    size_t tl = tab ? (size_t)(tab - t) : strlen(t);
+    snprintf(si->title, sizeof si->title, "%.*s", (int)(tl < sizeof si->title ? tl : sizeof si->title - 1), t);
+    if (tab) snprintf(si->artist, sizeof si->artist, "%s", tab + 1);
+    return true;
+}
+
 bool gamedata_load(GameData *gd, const char *path) {
     memset(gd, 0, sizeof *gd);
     char *text = read_file(path, NULL);
     if (!text) { log_msg("cannot read %s (run `make setup IPA=...` first)", path); return false; }
 
-    int nkana = 0, nboard = 0, nsound = 0, ok_tables = 0, nguide = 0, nending = 0;
+    int nkana = 0, nboard = 0, nsound = 0, ok_tables = 0, nguide = 0, nending = 0, ndlc = 0;
+    SongInfo *dlc = NULL;
     char *save = NULL;
     for (char *line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
         if (line[0] == '#' || !line[0]) continue;
@@ -38,8 +63,13 @@ bool gamedata_load(GameData *gd, const char *path) {
                 snprintf(si->title, sizeof si->title, "%s", line + 5 + consumed);
                 si->bpm = bpm;
                 si->stars[0] = s0; si->stars[1] = s1; si->stars[2] = s2; si->stars[3] = s3;
+                si->id = idx;
+                si->art_index = idx % 3;   /* _sTblDefaultMusicPackData: ArtWorkIndex = idx % 3 */
                 if (idx + 1 > gd->nsongs) gd->nsongs = idx + 1;
             }
+        } else if (!strncmp(line, "dlc ", 4)) {
+            if (!dlc) dlc = calloc(MAX_SONGS, sizeof *dlc);
+            if (dlc && ndlc < MAX_SONGS && parse_dlc(line + 4, &dlc[ndlc])) ndlc++;
         } else if (!strncmp(line, "kana ", 5)) {
             int v[7];
             if (read_ints(line + 5, v, 7) == 7 && v[0] >= 0 && v[0] < NUM_KANA) {
@@ -96,6 +126,17 @@ bool gamedata_load(GameData *gd, const char *path) {
     free(text);
     gd->nending = nending == ENDING_LINES ? ENDING_LINES : 0;   /* all rows or none (older gamedata.txt) */
     if (gd->nending == 0) log_msg("%s has no ending credits (rerun make setup for the OPTIONS ENDING button)", path);
+    /* DLC songs (dlc.c, from the original save) after the built-in ones, in pack order */
+    int nbase = gd->nsongs;
+    for (int k = 0; k < ndlc && nbase > 0; k++) {
+        bool dup = false;
+        for (int i = 0; i < gd->nsongs && !dup; i++) dup = gd->songs[i].id == dlc[k].id;
+        if (dup || gd->nsongs >= MAX_SONGS) { log_msg("gamedata: skipping DLC song %d (%s)", dlc[k].id, dlc[k].movie); continue; }
+        gd->songs[gd->nsongs++] = dlc[k];
+    }
+    free(dlc);
+    gd->nbase = nbase;
+    if (gd->nsongs > nbase) log_msg("gamedata: %d built-in + %d DLC songs", nbase, gd->nsongs - nbase);
     if (gd->nsongs == 0 || nkana != NUM_KANA || nboard != NUM_KEYS || nguide != NUM_KEYS || ok_tables != 7 || nsound != NUM_SOUNDS) {
         log_msg("%s is incomplete or outdated, rerun make setup (songs %d, kana %d, keys %d, tables %d, sounds %d)", path, gd->nsongs, nkana,
                 nboard, ok_tables, nsound);

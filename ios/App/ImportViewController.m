@@ -162,7 +162,8 @@ static void mf_ipa_progress_cb(void *ud, double frac, const char *file);
     driveIcon.tintColor = MikuTeal();
     [driveIcon setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     UILabel *pillLabel = [[UILabel alloc] init];
-    pillLabel.text = @"Allow ~2 GB free space · Excluded from iCloud Backup";
+    pillLabel.text = self.addDlc ? @"Allow ~16 GB free space · Excluded from iCloud Backup"
+                                 : @"Allow ~2 GB free space · Excluded from iCloud Backup";
     pillLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
     pillLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.75];
     pillLabel.numberOfLines = 0;
@@ -230,12 +231,12 @@ static void mf_ipa_progress_cb(void *ud, double frac, const char *file);
     [_actionButton.heightAnchor constraintEqualToConstant:56.0].active = YES;
     [_actionButton addTarget:self action:@selector(importTapped) forControlEvents:UIControlEventTouchUpInside];
 
-    // update mode only: keep the current data for now
+    // update mode: keep the current data for now; DLC mode: back to the DLC page
     _laterButton = [UIButton buttonWithType:UIButtonTypeSystem];
     _laterButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_laterButton.heightAnchor constraintEqualToConstant:44.0].active = YES;
     UIButtonConfiguration *laterCfg = [UIButtonConfiguration plainButtonConfiguration];
-    laterCfg.title = @"Not Now";
+    laterCfg.title = self.addDlc ? @"Cancel" : @"Not Now";
     laterCfg.baseForegroundColor = [UIColor colorWithWhite:1.0 alpha:0.8];
     _laterButton.configuration = laterCfg;
     [_laterButton addTarget:self action:@selector(laterTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -271,8 +272,10 @@ static void mf_ipa_progress_cb(void *ud, double frac, const char *file);
         if (phase == MFImportPhasePrompt) {
             self.statusIcon.image = [UIImage systemImageNamed:@"doc.zipper" withConfiguration:iconSym];
             self.statusIcon.tintColor = MikuTeal();
-            self.cardTitleLabel.text = self.update ? @"Game Data Update" : @"Game Data Needed";
-            self.bodyLabel.text = self.update
+            self.cardTitleLabel.text = self.addDlc ? @"Add DLC Songs" : self.update ? @"Game Data Update" : @"Game Data Needed";
+            self.bodyLabel.text = self.addDlc
+                ? @"Pick an IPA that includes the DLC packs, like the “All DLC Included” one."
+                : self.update
                 ? @"This version also reads the help text and the ending credits from your IPA. Import it once more to add them; your scores and options are kept."
                 : @"This app contains no SEGA or Crypton game data. Select your own decrypted Miku Flick/02 v1.1.5 IPA from Files to import it locally.";
             self.bodyLabel.hidden = NO;
@@ -281,7 +284,7 @@ static void mf_ipa_progress_cb(void *ud, double frac, const char *file);
             self.actionButton.hidden = NO;
             self.actionButton.enabled = YES;
             [self configureButtonTitle:@"Import IPA" symbol:@"folder.badge.plus"];
-            self.laterButton.hidden = !self.update;
+            self.laterButton.hidden = !(self.update || self.addDlc);
         } else if (phase == MFImportPhaseImporting) {
             self.statusIcon.image = [UIImage systemImageNamed:@"arrow.down.circle.fill" withConfiguration:iconSym];
             self.statusIcon.tintColor = MikuTeal();
@@ -306,7 +309,7 @@ static void mf_ipa_progress_cb(void *ud, double frac, const char *file);
             self.actionButton.hidden = NO;
             self.actionButton.enabled = YES;
             [self configureButtonTitle:@"Try Again" symbol:@"arrow.clockwise"];
-            self.laterButton.hidden = !self.update;
+            self.laterButton.hidden = !(self.update || self.addDlc);
         }
         [self.view layoutIfNeeded];
     };
