@@ -214,8 +214,12 @@ static BOOL Busy(const DlcDlStatus *st) {
     snprintf(self.page->url, sizeof self.page->url, "%s", url);   // saved by the page's tick
     self.linkField.text = Str(self.page->url);
     dlcdl_list(self.page->url);
-    [self refresh];
-    [self.tableView reloadData];   // Restore Default Link comes or goes
+    /* Restore Default Link comes or goes, so the row count changes: take the new state without the
+       in-place row update of -refresh (it would reconfigure rows of the old layout and throw) */
+    dlcdl_status(&_st);
+    self.shownPacks = self.page->installed_packs;
+    self.shownSongs = self.page->installed_songs;
+    [self.tableView reloadData];
 }
 
 - (void)restoreDefaultLink {
