@@ -72,7 +72,7 @@ static UIColor *MikuTeal(void) {
         return [NSString stringWithFormat:@"%d pack%@, %d songs installed.", self.page->installed_packs,
                                           self.page->installed_packs == 1 ? @"" : @"s", self.page->installed_songs];
     }
-    return @"Import an IPA that includes the DLC packs, like the “All DLC Included” one, to add its songs.";
+    return nil;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {

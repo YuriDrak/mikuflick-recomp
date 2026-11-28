@@ -14,7 +14,7 @@
  *      Container/Library/InstallData/Mov_<pack>/ + Container/Documents/MikuFlick2.dat)
  *      get the pack files flattened into the same folder, and the DLC song
  *      table is read from that original save (dlc.c) and appended to gamedata.txt.
- *      An IPA without DLC keeps the packs of the previous import (keep_dlc_songs);
+ *      Earlier packs the IPA does not bring are kept (keep_dlc_songs);
  *   4. swap the new folder in as MikuFlick2.app and gamedata.txt last, so a
  *      half-finished import never looks complete.
  *
@@ -590,30 +590,44 @@ static bool move_over(const char *old_app, const char *new_app, const char *name
     return rename(from, to) == 0;
 }
 
-/* Re-importing an IPA without DLC (e.g. the plain one) after a DLC import: carries the previous
-   DLC songs over (their "dlc" lines from the old gamedata.txt, their files from the old app
-   folder, which is still in place at this point) instead of dropping them. Returns the count. */
+/* gamedata (the new one, being written) already has a "dlc" line for this movie */
+static bool dlc_listed(const char *gamedata, const char *movie) {
+    FILE *f = fopen(gamedata, "r");
+    if (!f) return false;
+    char line[1024], mv[64];
+    bool found = false;
+    while (!found && fgets(line, sizeof line, f))
+        found = !strncmp(line, "dlc ", 4) && sscanf(line + 4, "%*d %*d %*d %*d %*s %63s", mv) == 1 && !strcmp(mv, movie);
+    fclose(f);
+    return found;
+}
+
+/* Carries the previous DLC songs over (their "dlc" lines from the old gamedata.txt, their files from
+   the old app folder, which is still in place at this point) instead of dropping them: after an IPA
+   without DLC (e.g. the plain one), and for packs an IPA with DLC does not have (e.g. ones downloaded
+   on the DLC page). Songs the new IPA brings are left to it. Returns the count. */
 static int keep_dlc_songs(const char *gd_old, const char *old_app, const char *new_app, const char *gd_new) {
     FILE *in = fopen(gd_old, "r");
     if (!in) return 0;
-    FILE *out = fopen(gd_new, "a");
-    if (!out) { fclose(in); return 0; }
     char line[1024], pv[64], mv[64], atlas[64], name[80];
     int n = 0;
     while (fgets(line, sizeof line, in)) {
         if (strncmp(line, "dlc ", 4) || !strchr(line, '\n') ||
             sscanf(line + 4, "%*d %*d %*d %*d %63s %63s %63s", pv, mv, atlas) != 3)
             continue;
-        if (strchr(pv, '/') || strchr(mv, '/') || strchr(atlas, '/')) continue;
+        if (strchr(pv, '/') || strchr(mv, '/') || strchr(atlas, '/') || dlc_listed(gd_new, mv)) continue;
+        FILE *out = fopen(gd_new, "a");
+        if (!out) break;
         snprintf(name, sizeof name, "%s.usm", mv);
         bool ok = move_over(old_app, new_app, name);
         snprintf(name, sizeof name, "%s.png", atlas);
         ok = move_over(old_app, new_app, name) && ok;
         if (strcmp(pv, "-")) { snprintf(name, sizeof name, "%s.adx", pv); move_over(old_app, new_app, name); }
-        if (ok && fputs(line, out) >= 0) n++;
+        bool put = ok && fputs(line, out) >= 0;
+        if (fclose(out) != 0) put = false;
+        n += put;
     }
     fclose(in);
-    if (fclose(out) != 0) n = 0;
     if (n) log_msg("import: kept %d DLC songs from the previous import", n);
     return n;
 }
@@ -757,10 +771,10 @@ bool ipa_import(int fd, const char *dir, IpaProgress cb, void *ud, char *err, si
         seterr(err, errlen, "Cannot replace %s (%s).", path, strerror(errno));
         goto fail_tmp;
     }
-    if (!save_e) {   /* this IPA has no DLC: keep the packs of the previous import */
+    {   /* earlier packs this IPA does not bring (all of them for an IPA without DLC) stay */
         char gd_old[1280];
         snprintf(gd_old, sizeof gd_old, "%s/gamedata.txt", dir);
-        ndlc = keep_dlc_songs(gd_old, old, path, gd_tmp);
+        ndlc += keep_dlc_songs(gd_old, old, path, gd_tmp);
     }
     remove_tree(old);
     snprintf(path, sizeof path, "%s/gamedata.txt", dir);

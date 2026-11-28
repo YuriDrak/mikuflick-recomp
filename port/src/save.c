@@ -11,13 +11,16 @@
 #include <string.h>
 #include <sys/stat.h>
 
+/* a number is a built-in song first; otherwise (or if no built-in song has it) a DLC movie name,
+   since some of those are numbers too ("39", Thankyou Pack) */
 static int song_by_key(const GameData *gd, const char *key) {
-    bool number = isdigit((unsigned char)key[0]);
-    int id = number ? atoi(key) : -1;
-    for (int i = 0; gd && i < gd->nsongs; i++) {
-        const SongInfo *si = &gd->songs[i];
-        if (number ? si->pack == 0 && si->id == id : si->pack != 0 && !strcmp(si->movie, key)) return i;
+    if (isdigit((unsigned char)key[0])) {
+        int id = atoi(key);
+        for (int i = 0; gd && i < gd->nsongs; i++)
+            if (gd->songs[i].pack == 0 && gd->songs[i].id == id) return i;
     }
+    for (int i = 0; gd && i < gd->nsongs; i++)
+        if (gd->songs[i].pack != 0 && !strcmp(gd->songs[i].movie, key)) return i;
     return -1;
 }
 

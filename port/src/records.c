@@ -72,8 +72,10 @@ struct Records {
     double tick_acc;
     Atlas bg;                      /* bg_tex_05: bg_results */
     bool bg_loaded;
-    Atlas music[8];
+    Atlas music[8];                /* song art sheets by name (as ui.c), least recently used replaced */
     bool music_loaded[8];
+    char music_name[8][64];
+    unsigned music_used[8], music_clock;
     int bgm_voice;
     /* the touch that pressed a button (TouchBase m_TouchDownIdx): press point, largest move */
     int press;
@@ -258,8 +260,11 @@ Records *records_create(SDL_Renderer *ren, Assets *as, const GameData *gd, const
 static void free_textures(Records *r) {
     if (r->bg_loaded) atlas_free(&r->bg);
     r->bg_loaded = false;
-    for (int i = 0; i < 8; i++)
-        if (r->music_loaded[i]) { atlas_free(&r->music[i]); r->music_loaded[i] = false; }
+    for (int i = 0; i < 8; i++) {
+        if (r->music_loaded[i]) atlas_free(&r->music[i]);
+        r->music_loaded[i] = false;
+        r->music_name[i][0] = 0;
+    }
 }
 
 void records_destroy(Records *r) {
@@ -678,28 +683,35 @@ static void record_tick(Records *r) {
 
 /* ---- render */
 
-static int art_slot(const char *atlas) {
-    size_t l = strlen(atlas);
-    int n = l ? atlas[l - 1] - '0' : 0;
-    return (n >= 0 && n < 8) ? n : 0;
-}
+#define MUSIC_REF "music_00_01"   /* the only art sheet with a .plist; never replaced */
 
-static Atlas *music_slot(Records *r, int slot, const char *name) {
-    if (!r->music_loaded[slot]) {
-        r->music_loaded[slot] = atlas_load(&r->music[slot], r->ren, r->as->appdir, name);
-        if (!r->music_loaded[slot]) return NULL;
+/* art sheet by name (music_00_01..04 built-in, music_NN_01 per DLC pack), as ui.c music_sheet */
+static Atlas *music_sheet(Records *r, const char *name) {
+    int slot = -1, lru = -1;
+    for (int i = 0; i < 8; i++) {
+        if (!strcmp(r->music_name[i], name)) {
+            r->music_used[i] = ++r->music_clock;
+            return r->music_loaded[i] ? &r->music[i] : NULL;
+        }
+        if (!r->music_name[i][0]) { if (slot < 0) slot = i; }
+        else if (strcmp(r->music_name[i], MUSIC_REF) && (lru < 0 || r->music_used[i] < r->music_used[lru])) lru = i;
     }
-    return &r->music[slot];
+    if (slot < 0) slot = lru;
+    if (slot < 0) return NULL;
+    if (r->music_loaded[slot]) atlas_free(&r->music[slot]);
+    snprintf(r->music_name[slot], sizeof r->music_name[slot], "%s", name);
+    r->music_loaded[slot] = atlas_load(&r->music[slot], r->ren, r->as->appdir, name);
+    r->music_used[slot] = ++r->music_clock;
+    return r->music_loaded[slot] ? &r->music[slot] : NULL;
 }
 
 /* song art/logo; only music_00_01 has a plist, the other sheets share its layout (as ui.c) */
 static void draw_music(Records *r, int song, const char *kind, float x, float y, float w, float h) {
-    const char *name = r->gd->songs[song].art_atlas;
-    Atlas *m = music_slot(r, art_slot(name), name);
-    Atlas *ref = music_slot(r, 1, "music_00_01");
+    Atlas *ref = music_sheet(r, MUSIC_REF);
+    Atlas *m = music_sheet(r, r->gd->songs[song].art_atlas);
     if (!m || !ref) return;
     char fn[64];
-    snprintf(fn, sizeof fn, "%s_00_01_%02d", kind, song % 3);
+    snprintf(fn, sizeof fn, "%s_00_01_%02d", kind, r->gd->songs[song].art_index);   /* SetArtWorkIndex */
     const Frame *f = atlas_find(ref, fn);
     if (f) spr_tl_rect(r->ren, m, &f->r, x, y, w, h, 255);
 }

@@ -107,8 +107,6 @@ final class DlcPage extends NativePage {
         LinearLayout.LayoutParams ilp = lp(MATCH, WRAP);
         ilp.topMargin = dp(26);
         col.addView(importCard, ilp);
-        footer(col).setText("Import an IPA that includes the DLC packs, like the “All DLC Included” one, to add its songs.");
-
         apply();
         return root;
     }
