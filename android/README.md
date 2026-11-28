@@ -6,6 +6,10 @@ built with the NDK through CMake and wrapped in SDL's Java activity. Like the
 Linux build, it ships **no SEGA/Crypton data**: you import the game data from
 your own decrypted IPA on the device (or copy an existing extraction from a PC).
 
+## Download
+
+Each [release](https://github.com/YuriDrak/mikuflick-recomp/releases/latest) has a ready-made `mikuflick-<version>-android.apk`: open it on the phone to install it. It is a debug build signed with a key made by CI for that release. A newer release therefore only installs after you uninstall the old one, which also deletes the imported game data and your saves.
+
 ## Requirements
 
 - JDK 17 or newer, `curl`, `unzip`, `adb`.
@@ -27,7 +31,7 @@ make -C android sdk         # installs NDK, CMake, platform 35, build-tools 35
 make -C android apk         # -> android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-GitHub Actions runs these same steps on every push and pull request (`.github/workflows/build.yml`, licences accepted with `yes`) and uploads the debug APK as a run artifact. It is signed with a debug key made on the runner for that run, so a CI APK only installs over another after an uninstall.
+GitHub Actions runs these same steps on every push and pull request (`.github/workflows/build.yml`, licences accepted with `yes`) and uploads the debug APK as a run artifact. For a version tag, the same APK is attached to the release as `mikuflick-<version>-android.apk`. It is signed with a debug key made on the runner for that run, so a CI APK only installs over another after an uninstall.
 
 The debug APK contains `arm64-v8a`, `armeabi-v7a` and `x86_64` libraries
 (16 KB page aligned), targets API 35 and needs Android 7.0 (API 24) or newer.
@@ -47,6 +51,23 @@ it). On first start the app shows **Game data needed**:
 Afterwards the IPA is no longer needed and can be deleted. The importer
 (`port/src/ipa.c`) only reads the file you pick and only writes to the app's
 own folder; a failed or interrupted import leaves no half-finished data behind.
+The import screen is a native Android page (`ImportPage.java`). If the data
+comes from an older build, it comes back in update mode, with **Not Now** to
+keep the current data.
+
+## DLC page
+
+The title menu's **DLC** button opens a native page (`DlcPage.java`):
+
+- **Show DLC Songs**;
+- the download link, which starts with the archive.org link.
+  **Restore Default Link** appears when you change it;
+- the 21 packs. Tap a pack to download it (230–360 MB). Tap it again to
+  cancel; the cancel dialog removes that pack's files;
+- **Import IPA with DLC**.
+
+Downloads use `HttpURLConnection` range requests. The `INTERNET` permission is
+used only for them. See [DLC songs](../README.md#dlc-songs).
 
 ### Alternative: copy the data from a PC
 
@@ -57,7 +78,7 @@ make -C android push                       # copies MikuFlick2.app (~980 MB) + g
 
 `push` copies the files to the app's own storage folder,
 `/sdcard/Android/data/io.github.yuridrak.mikuflick/files/`, which needs no
-storage permission. If they are missing, the app shows that path on screen.
+storage permission. If they are missing, the app shows the import screen.
 `adb push` creates the folders as the shell user with mode `2770`, which the
 app cannot enter, so `push` also makes them `0775`. If you copy the data some
 other way and the app still says it is missing, check that the app can open the
@@ -95,8 +116,14 @@ magnet Extreme with `--autoplay` gives the same result as on Linux (115,616,
 PERFECT, 172 COOL, 77/77 interludes); video, menus by touch, the Back button,
 the filled bars and the touch areas of the flick keys were checked. The import
 path was verified on Linux against `unzip` + `mfextract` (identical output);
-the on-device **IMPORT IPA** flow still needs to be confirmed on real phones and
-file providers. Not measured yet: audio latency on different phones.
+the on-device **Import IPA** flow still needs to be confirmed on more phones and
+file providers.
+
+Galaxy S24 (Android 16): the native import screen (first start and update
+mode), black bars in game, the DLC page, a pack list and pack download from
+the archive.org link with progress, cancel (the folder is unchanged
+afterwards), a custom link with Restore Default Link, and DLC songs in music
+select. Not measured yet: audio latency on different phones.
 
 ## Layout
 
