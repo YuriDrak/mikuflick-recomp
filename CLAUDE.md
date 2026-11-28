@@ -20,7 +20,7 @@ You MUST strictly adhere to the following rules at all times during this project
 
 # Project Status
 
-_Last updated: 2026-11-24._
+_Last updated: 2026-11-27._
 
 ## Overview
 
@@ -30,7 +30,7 @@ The repository ships **no SEGA/Crypton game data**. A user-supplied, decrypted I
 
 ## Implemented
 
-- **Port** (`port/src`, ~5700 lines, excluding vendored pl_mpeg): `main`, `game`, `ui`, `media`, `mixer`, `usm`, `atlas`, `bplist`, `text`, `save`, `gamedata`, `assets`, `util`, `view` (screen composition), `ipa` (in-app IPA importer: zip + inflate), `mfx` (game tables from the binary, shared with `tools/mfextract`), `pl_mpeg_impl` + `mf.h`. No FFmpeg: own USM payload reader, ADX and IMA4 decoders, MPEG-1 via vendored `port/third_party/pl_mpeg.h` (MIT, patched for the 11-bit intra DC precision of the Sofdec/TMPGEnc streams; see `MIKUFLICK PATCH`).
+- **Port** (`port/src`, ~5700 lines, excluding vendored pl_mpeg): `main`, `game`, `ui`, `media`, `mixer`, `usm`, `atlas`, `bplist`, `text`, `save`, `gamedata`, `assets`, `util`, `view` (screen composition), `ipa` (in-app IPA importer: zip + inflate, read through a `ZipSrc`), `dlc` (DLC song table from the original save), `android` (JNI glue for the native Android pages), `mfx` (game tables from the binary, shared with `tools/mfextract`), `pl_mpeg_impl` + `mf.h`. No FFmpeg: own USM payload reader, ADX and IMA4 decoders, MPEG-1 via vendored `port/third_party/pl_mpeg.h` (MIT, patched for the 11-bit intra DC precision of the Sofdec/TMPGEnc streams; see `MIKUFLICK PATCH`).
 - **Android** (`android/`): Gradle (AGP 8.7) + CMake build of the same sources with SDL2 2.30.10, SDL2_image 2.8.2, SDL2_ttf 2.22.0; `make -C android toolchain|sdk|apk|install|push|run|logcat`. SDK, NDK r27c, Gradle and caches live in gitignored `android/third_party/` (~3 GB). The project path contains a space: the stock `sdkmanager` script and `ndk-build` break on it, so the Makefile calls sdkmanager via `java` and the native build uses CMake. On first start the app imports the user's own IPA (system file picker -> fd -> `ipa.c`) into its external files dir; `make -C android push` (adb, folders chmod 0775) remains as an alternative.
 - **Screens/features**: boot logos, title, music select (cover flow, artwork, stars, previews), full rhythm game (video, two ADX tracks, flick notes, interludes, judgement, scoring, combo/climax bonuses, tension gauge with vocal fade, game over, pause menu with RESUME/RETRY/MUSIC SELECT), result screen with ranks, OPTIONS (display, audio, handedness, keyboard, help, credits; saved), PV viewer (lyrics, KARAOKE, LOOP, SHUFFLE), persistent save.
 - **Screen**: `view.c` renders the 640×960 scene to a target shown centred; non-2:3 screens get a blurred video/menu backdrop in the bars (RGBA32 targets: SDL GLES2 swaps YUV colours on BGRA targets).
@@ -39,6 +39,8 @@ The repository ships **no SEGA/Crypton game data**. A user-supplied, decrypted I
 - **RE tooling** (`tools/`): own C tools `machoinfo`, `usmdump`, `bplist2json`, `mfextract`, plus Ghidra scripts and IPA extractor. Ghidra is **not vendored**; `tools/ghidra_decompile.sh` uses `GHIDRA_DIR` or `tools/third_party/`.
 - **Docs**: `docs/archive_layout.md` (IPA inventory), `docs/re_notes.md` (formats, formulas, scene/render analysis), `docs/linux_port_plan.md` (design, timing, deviations, verification).
 - **CI** (`.github/workflows/build.yml`, branch `android-fixes`): every push/PR builds the Linux port, an unsigned Release iOS IPA (macos-26 runner) and the Android debug APK (runner-made debug key), uploaded as run artifacts; no game data in them. Published releases also get `MikuFlick.ipa` (version from the tag) and `altsource.json` (`ios/altsource.sh`), so `releases/latest/download/altsource.json` is the AltStore/SideStore/Feather source.
+
+- **DLC** (issue #4; split into stacked PRs: `android-fixes` → `dlc-import` (this: Container/ import, keyed saves, show/hide page) → `dlc-download` (per-pack downloads, INTERNET permission; full tree = branch `dlc-support`)): IPAs with the iMazing-style `Container/` (archive.org "All DLC Included", 7.6 GB) give 63 DLC songs in 21 packs (1–17, 96–99) via `make setup`, `--import-ipa` or IMPORT IPA; the song table comes from the original save `Container/Documents/MikuFlick2.dat` (`dlc.c`, re_notes §5.14). The title SHOP slot is the DLC page (SDL page on Linux, native screens on iOS (UIKit `DlcViewController`) and Android (`DlcPage.java` of plain framework views, driven through `android.c`; the game loop draws nothing meanwhile)): SHOW DLC SONGS toggle, installed counts, IMPORT IPA with DLC (native pages). Per-song save lines (`rec`/`recx`/`flk`/`timing`) key DLC songs by movie name, built-in songs by number; lines of songs not installed are kept.
 - **Movie deblocking** (`media.c`, pl_mpeg `plm_video_get_quantizer` patch): the 320×480 low-bit-rate movies get a post-filter that ramps out 8×8 block steps in smooth areas; `MF_NO_DEBLOCK=1` turns it off.
 
 ## Verified (see `docs/linux_port_plan.md` §7)
@@ -54,11 +56,13 @@ The repository ships **no SEGA/Crypton game data**. A user-supplied, decrypted I
 - Played by hand on the phone by the user (2026-11-24) after the touch-area and screen-fill fixes.
 - In-app importer (`--import-ipa` on Linux, same code as Android): 175 files byte-identical to `unzip`, `gamedata.txt` identical to `mfextract`, ~7 s; bad/truncated files refused cleanly. Device test of the Android IMPORT IPA flow is pending (to be done by the user).
 
+- DLC (2026-11-27, macOS build): full DLC IPA (md5 matches archive.org) imports 63 DLC songs in 32 s; autoplay Extreme all-COOL on DLC songs from packs 1, 96, 97, 99. After the move onto upstream main: magnet Extreme still 115,616 (both autoplay modes), カンタレラ records saved by movie. (Download results: see the `dlc-download` branch.) Not yet built/tested: `make setup` with the DLC IPA.
+
 **Not yet measured:** audio output latency across devices (PipeWire/Pulse; OpenSL ES on phones), long sessions, phones other than the A059P. Software-renderer timing is frame-rate sensitive.
 
 ## Deliberately not implemented
 
-Shop/DLC, Twitter, Game Center, ads/info feed, replays, collection and PV playlist editing. Only the 11 bundled songs are playable (DLC servers are gone). All songs/difficulties are unlocked.
+Shop/DLC purchases, Twitter, Game Center, ads/info feed, replays, collection and PV playlist editing. The 11 bundled songs are always playable; DLC songs only from an IPA that contains them (DLC servers are gone). All songs/difficulties are unlocked.
 
 ## Repository / publication state
 
@@ -89,4 +93,5 @@ make -C android install run       # then IMPORT IPA in the app (or: make -C andr
 
 1. Measure audio latency on phones and add a tap-to-calibrate screen; test more phones/aspect ratios.
 2. Android extras: release signing, GL context-loss texture reload; confirm the in-app import on more phones/file providers (it needs a seekable file descriptor).
-3. Optional cleanups: confirm the licence choice and consider a small curated, non-copyrighted subset of RE outputs if ever needed.
+3. DLC: land the three stacked PRs (android-fixes, dlc-import, dlc-download); build/test the Android and iOS download paths on devices; ask the maintainer whether a default link may be offered. Custom songs are planned (parked: an own `.flick` chart format with kana inline, not `.osu`): songs are keyed by movie name in the save, new song sources should get their own `gamedata.txt` line type/pack ids and, ideally, their own folder instead of the flattened app folder; charts live in the `.usm` cue points (re_notes §2).
+4. Optional cleanups: confirm the licence choice and consider a small curated, non-copyrighted subset of RE outputs if ever needed.

@@ -108,6 +108,7 @@ void digits_draw(SDL_Renderer *ren, const Atlas *a, const char *prefix, long val
 typedef struct { bool on; int frame; float x, y, vx, vy, sx, sy, ang, angv; } BgFx;
 
 #define MAX_TITLEFX 192
+#define MUSIC_CACHE 12           /* art sheets kept loaded (4 built-in + 1 per DLC pack, 1024x1024 each) */
 
 /* EffectTitleFlower: additive key sprite thrown out from Miku's hands on the title screen */
 typedef struct { bool on; int tex; unsigned timer; float x, y, vx, vy, sx, sy, ang, angv; } TitleFx;
@@ -138,8 +139,10 @@ struct UiState {
     int menu_focus, menu_press;
     /* select */
     int song, diff;
-    Atlas music[8];
-    bool music_loaded[8];
+    Atlas music[MUSIC_CACHE];    /* song art sheets (music_NN_0M), least recently used evicted */
+    char music_name[MUSIC_CACHE][64];   /* "" = free slot */
+    bool music_ok[MUSIC_CACHE];  /* false: load failed (kept so it is not retried every frame) */
+    unsigned music_used[MUSIC_CACHE], music_clock;
     Cover cov[MAX_SONGS];
     /* WindowBase scroll state (x only: the y limits are equal, so the y factor is 0) */
     float scr;                   /* m_ScrPos.x */
@@ -173,6 +176,7 @@ struct UiState {
     /* options */
     int opt_mode, opt_row, help_page;
     unsigned credits_t;
+    /* DLC page */
     /* PV viewer */
     int pv_focus;
     bool pv_lyrics, pv_karaoke, pv_loop, pv_shuffle;
@@ -250,46 +254,68 @@ static void play_bgm(UiState *u, int id) {
 void ui_destroy(UiState *u) {
     if (!u) return;
     stop_preview(u);
-    for (int i = 0; i < 8; i++) if (u->music_loaded[i]) atlas_free(&u->music[i]);
+    for (int i = 0; i < MUSIC_CACHE; i++) if (u->music_ok[i]) atlas_free(&u->music[i]);
     free(u);
 }
 
-/* music_00_0N atlas index from "music_00_0N" */
-static int art_slot(const char *atlas) {
-    size_t l = strlen(atlas);
-    int n = l ? atlas[l - 1] - '0' : 0;
-    return (n >= 0 && n < 8) ? n : 0;
+#define MUSIC_REF "music_00_01"   /* the only art sheet with a .plist; never evicted */
+
+void ui_songs_changed(UiState *u) {
+    stop_preview(u);
+    for (int i = 0; i < MUSIC_CACHE; i++) {
+        if (u->music_ok[i]) atlas_free(&u->music[i]);
+        u->music_ok[i] = false;
+        u->music_name[i][0] = 0;
+    }
+    u->song = 0;
+    u->preview_song = -1;
 }
 
-static Atlas *load_music_slot(UiState *u, int slot, const char *name) {
-    if (!u->music_loaded[slot]) {
-        u->music_loaded[slot] = atlas_load(&u->music[slot], u->ren, u->as->appdir, name);
-        if (!u->music_loaded[slot]) return NULL;
+/* art sheet by name (music_00_01..04 built-in, music_NN_01 per DLC pack). With 70+ songs the
+   sheets no longer all fit, so the least recently drawn one is replaced. */
+static Atlas *music_sheet(UiState *u, const char *name) {
+    int slot = -1, lru = -1;
+    for (int i = 0; i < MUSIC_CACHE; i++) {
+        if (!strcmp(u->music_name[i], name)) {
+            u->music_used[i] = ++u->music_clock;
+            return u->music_ok[i] ? &u->music[i] : NULL;
+        }
+        if (!u->music_name[i][0]) { if (slot < 0) slot = i; }
+        else if (strcmp(u->music_name[i], MUSIC_REF) && (lru < 0 || u->music_used[i] < u->music_used[lru])) lru = i;
     }
-    return &u->music[slot];
+    if (slot < 0) slot = lru;
+    if (slot < 0) return NULL;
+    if (u->music_ok[slot]) atlas_free(&u->music[slot]);
+    snprintf(u->music_name[slot], sizeof u->music_name[slot], "%s", name);
+    u->music_ok[slot] = atlas_load(&u->music[slot], u->ren, u->as->appdir, name);
+    if (!u->music_ok[slot]) log_msg("song art %s not found", name);
+    u->music_used[slot] = ++u->music_clock;
+    return u->music_ok[slot] ? &u->music[slot] : NULL;
 }
 
 static Atlas *music_atlas(UiState *u, int song) {
-    const char *name = u->gd->songs[song].art_atlas;
-    return load_music_slot(u, art_slot(name), name);
+    return music_sheet(u, u->gd->songs[song].art_atlas);
 }
 
-/* Song art/logo: only music_00_01 ships a .plist; the other music_00_0N sheets share its
-   layout, so frame rects come from music_00_01. */
+/* Song art/logo: only music_00_01 ships a .plist; the other sheets (music_00_02..04 and the DLC
+   music_NN_01) share its layout, so frame rects come from music_00_01. */
 static const Frame *music_frame(UiState *u, int song, const char *kind) {
-    Atlas *ref = load_music_slot(u, 1, "music_00_01");
+    Atlas *ref = music_sheet(u, MUSIC_REF);
     if (!ref) return NULL;
     char name[64];
-    snprintf(name, sizeof name, "%s_00_01_%02d", kind, song % 3); /* SetArtWorkIndex: idx % 3 */
+    snprintf(name, sizeof name, "%s_00_01_%02d", kind, u->gd->songs[song].art_index); /* SetArtWorkIndex */
     return atlas_find(ref, name);
 }
+
+/* songs in the cover flow: the DLC ones only while SHOW DLC SONGS is on */
+static int nvis(const UiState *u) { return visible_songs(u->gd, u->opt); }
 
 /* ------------------------------------------------------------ select: cover flow */
 
 /* WindowMusicSelect updateTitle:: @0x4017c + WindowCover setDirection:: @0x36758 */
 static void covers_retarget(UiState *u, int timer) {
     float x = 280.0f;
-    for (int i = 0; i < u->gd->nsongs; i++) {
+    for (int i = 0; i < nvis(u); i++) {
         Cover *c = &u->cov[i];
         c->tx = (i == 0 && u->song == 0) ? x + 40.0f : x;   /* original special-cases cover 0 when selected */
         x += (i == u->song || i == u->song - 1) ? 80.0f : 40.0f;
@@ -309,7 +335,7 @@ static float csr_target(int diff) {
 
 static void covers_snap(UiState *u) {
     covers_retarget(u, 0);
-    for (int i = 0; i < u->gd->nsongs; i++) {
+    for (int i = 0; i < nvis(u); i++) {
         Cover *c = &u->cov[i];
         c->x = c->tx; c->lx = c->tlx; c->ly = c->tly; c->rx = c->trx; c->ry = c->try_;
     }
@@ -454,7 +480,7 @@ static void scroll_touch(UiState *u, const SDL_Event *e) {
 /* one 30 Hz tick of WindowMusicSelect exec @0x41466..0x41880 (+ its WindowCover / WindowBGEffect
    children, which run twice per frame, see bgfx_exec) */
 static void select_tick(UiState *u) {
-    int n = u->gd->nsongs;
+    int n = nvis(u);   /* DLC songs only while SHOW DLC SONGS is on */
     /* CloudSimpleSpring::Compute first */
     u->spr_pos += (u->spr_tgt - u->spr_pos) * 0.5f;
     if (n >= 2) {
@@ -578,7 +604,7 @@ static void render_titlefx(UiState *u) {
 
 /* ------------------------------------------------------------ title state machine */
 
-static const char *k_menu_label[4] = {"RHYTHM GAME", "PV", "OPTIONS", "SHOP"};
+static const char *k_menu_label[4] = {"RHYTHM GAME", "PV", "OPTIONS", "DLC"};   /* port: DLC page in the SHOP slot */
 
 static void title_start_menu(UiState *u) {
     u->tstate = 10;
@@ -763,7 +789,12 @@ void ui_enter(UiState *u, int scene, const GameResult *res) {
         bgfx_reset(u);
         play_bgm(u, SND_BGM01 + 2);      /* OPTIONS switches to BGM03, sound #24 (@0x444be) */
     }
+    if (scene == SCENE_DLC) {
+        u->scene = SCENE_OPTION;
+        opt_open(u, 7 /* OPT_DLC */);
+    }
     if (scene == SCENE_SELECT || scene == SCENE_PV) {
+        if (u->song >= nvis(u)) u->song = 0;   /* DLC songs hidden, or another import */
         stop_bgm(u);
         stop_preview(u);
         covers_snap(u);
@@ -801,7 +832,7 @@ void ui_enter(UiState *u, int scene, const GameResult *res) {
 static void select_move(UiState *u, int ds, int dd) {
     if (ds && !u->swiping) {
         int n = u->song + ds;
-        if (n >= 0 && n < u->gd->nsongs) {
+        if (n >= 0 && n < nvis(u)) {
             update_title(u, n);
             u->spr_tgt = (float)n * 40.0f;
         }
@@ -888,17 +919,20 @@ static int menu_activate(UiState *u, int i) {
     if (i == 0) return SCENE_SELECT;   /* RHYTHM GAME */
     if (i == 1) return SCENE_PV;       /* PV */
     if (i == 2) return SCENE_OPTION;   /* OPTIONS */
-    u->menu_focus = i;                 /* SHOP: the store is gone, so only the sound plays */
-    return -1;
+    return SCENE_DLC;                  /* SHOP slot: the store is gone, port DLC page instead */
 }
 
 /* ------------------------------------------------------------ options (SceneOption / WindowOption) */
 
-enum { OPT_MAIN, OPT_AUDIO, OPT_HAND, OPT_KEYBOARD, OPT_HELP, OPT_CREDITS, OPT_DISPLAY };
-static const char *k_opt_title[7] = {"OPTIONS", "AUDIO", "HANDEDNESS", "KEYBOARD", "HELP", "CREDITS", "DISPLAY"};
+enum { OPT_MAIN, OPT_AUDIO, OPT_HAND, OPT_KEYBOARD, OPT_HELP, OPT_CREDITS, OPT_DISPLAY, OPT_DLC };
+static const char *k_opt_title[8] = {"OPTIONS", "AUDIO", "HANDEDNESS", "KEYBOARD", "HELP", "CREDITS", "DISPLAY", "DLC"};
 /* Localizable.strings OPTION_TITLE_0N (English) */
-static const char *k_opt_sub[7] = {"Please select a category to change.", "MUSIC and SFX", "Handedness Settings",
-                                   "Keyboard Settings", "", "", "Configure Display Settings"};
+static const char *k_opt_sub[8] = {"Please select a category to change.", "MUSIC and SFX", "Handedness Settings",
+                                   "Keyboard Settings", "", "", "Configure Display Settings", "Downloadable Songs"};
+/* port-only DLC page (title SHOP slot) on Linux; iOS and Android show a native screen instead
+   (ios/App/DlcViewController.m, android/.../DlcPage.java): SHOW DLC SONGS ON / OFF and the number of
+   DLC packs and songs installed */
+static bool dlc_installed(const UiState *u) { return u->gd->nsongs > u->gd->nbase; }
 /* main list order as on the iOS screen (help_02 panel 2) -> mode */
 static const int k_opt_list[6] = {OPT_DISPLAY, OPT_AUDIO, OPT_HAND, OPT_KEYBOARD, OPT_HELP, OPT_CREDITS};
 /* TouchCommonButton initType:No:Pos: @0x63ee0: list buttons (menubutton_l_base 394x82) at x = 129 */
@@ -955,13 +989,21 @@ static void opt_adjust(UiState *u, int d) {
             play_sound(u->as, SE_BUTTON);   /* TouchHelpPage touchUp: SE 0x13 */
         }
         return;
+    case OPT_DLC:
+        if (u->opt_row != 0 || !dlc_installed(u)) { play_sound(u->as, SND_CANCEL); return; }
+        o->show_dlc = d < 0;
+        break;
     default: return;
     }
     opt_store(u);
     play_sound(u->as, SE_BUTTON);
 }
 
-static int opt_rows(int mode) { return mode == OPT_AUDIO || mode == OPT_KEYBOARD ? 3 : 1; }
+static int opt_rows(int mode) {
+    if (mode == OPT_DLC) return 1;
+    return mode == OPT_AUDIO || mode == OPT_KEYBOARD ? 3 : 1;
+}
+
 
 /* TouchSoundVolume touchDown/touchMoved/touchUp @0x77284/0x77364/0x772e8: a touch on a meter (box
    440x84 px = ColSize (220,42) points @0x76f64) only records its x; each move then adds dx/440 to that
@@ -1008,6 +1050,92 @@ static void opt_open(UiState *u, int mode) {
     if (mode == OPT_HELP) help_set_page(u->as->appdir, 0);   /* setMode HELP: m_HelpPage 0, setPage:0 */
 }
 
+/* ---- DLC page (Linux): SHOW DLC SONGS toggle and what is installed ---- */
+#define DLC_TOGGLE_X 380.0f   /* ON | OFF segments */
+#define DLC_TOGGLE_Y 152.0f
+#define DLC_TOGGLE_W 110.0f
+#define DLC_TOGGLE_H 56.0f
+
+static int dlc_event(UiState *u, bool key, SDL_Keycode k, bool click, float mx, float my, bool ok) {
+    if (key && (k == SDLK_UP || k == SDLK_DOWN || k == SDLK_LEFT || k == SDLK_RIGHT)) u->menu_kbd = true;
+    if (click) u->menu_kbd = false;
+    u->opt_row = 0;   /* one row: the toggle */
+    if (key && (k == SDLK_LEFT || k == SDLK_RIGHT)) opt_adjust(u, k == SDLK_LEFT ? -1 : 1);
+    if (ok) opt_adjust(u, u->opt->show_dlc ? 1 : -1);
+    if (click && my >= DLC_TOGGLE_Y && my < DLC_TOGGLE_Y + DLC_TOGGLE_H && mx >= DLC_TOGGLE_X &&
+        mx < DLC_TOGGLE_X + 2 * DLC_TOGGLE_W) {
+        bool on = mx < DLC_TOGGLE_X + DLC_TOGGLE_W;
+        if (u->opt->show_dlc != on) opt_adjust(u, on ? -1 : 1);
+    }
+    return -1;
+}
+
+/* Port-only look (not the original game's OPTIONS art), like the import screen: navy, teal, plain
+   rectangles, so the page does not pass for a feature of the original app. */
+static void dlc_card(SDL_Renderer *r, float x, float y, float w, float h, Uint8 a) {
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 255, 255, 255, a);
+    SDL_FRect c = {x, y, w, h};
+    SDL_RenderFillRectF(r, &c);
+}
+
+static void render_dlc(UiState *u) {
+    SDL_Renderer *r = u->ren;
+    const Options *o = u->opt;
+    SDL_Color dim = {170, 180, 190, 255}, focus = {255, 240, 120, 255};
+    bool have = dlc_installed(u), kbd = u->menu_kbd;
+
+    SDL_SetRenderDrawColor(r, 12, 16, 24, 255);
+    SDL_RenderClear(r);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 27, 181, 176, 255);
+    SDL_FRect band = {0, 0, LOGICAL_W, 6};
+    SDL_RenderFillRectF(r, &band);
+    font_draw(r, "DLC Packs", 320, 60, 4.0f, WHITE, 0);
+
+    /* Show DLC songs: segmented ON / OFF */
+    dlc_card(r, 24, 132, 592, 96, 14);
+    font_draw(r, "Show DLC songs", 48, 156, 2.4f, have ? WHITE : dim, -1);
+    font_draw(r, "in music select and PV", 48, 192, 1.5f, dim, -1);
+    static const char *lbl[2] = {"ON", "OFF"};
+    for (int i = 0; i < 2; i++) {
+        bool sel = o->show_dlc == (i == 0);
+        SDL_FRect seg = {DLC_TOGGLE_X + DLC_TOGGLE_W * i, DLC_TOGGLE_Y, DLC_TOGGLE_W, DLC_TOGGLE_H};
+        if (sel) SDL_SetRenderDrawColor(r, 27, 181, 176, have ? 255 : 120);
+        else SDL_SetRenderDrawColor(r, 55, 60, 72, 255);
+        SDL_RenderFillRectF(r, &seg);
+        font_draw(r, lbl[i], seg.x + seg.w / 2, seg.y + seg.h / 2 - 9, 2.4f, sel || have ? WHITE : dim, 0);
+    }
+    if (kbd) {
+        SDL_SetRenderDrawColor(r, focus.r, focus.g, focus.b, 255);
+        SDL_FRect fr = {DLC_TOGGLE_X - 4, DLC_TOGGLE_Y - 4, DLC_TOGGLE_W * 2 + 8, DLC_TOGGLE_H + 8};
+        SDL_RenderDrawRectF(r, &fr);
+    }
+    char buf[256];
+    int packs = 0;
+    for (int i = u->gd->nbase; i < u->gd->nsongs; i++) {
+        bool seen = false;
+        for (int k = u->gd->nbase; k < i && !seen; k++) seen = u->gd->songs[k].pack == u->gd->songs[i].pack;
+        packs += !seen;
+    }
+    if (have) snprintf(buf, sizeof buf, "%d pack%s, %d songs installed", packs, packs == 1 ? "" : "s", u->gd->nsongs - u->gd->nbase);
+    else snprintf(buf, sizeof buf, "No DLC songs installed");
+    font_draw(r, buf, 320, 248, 2.0f, WHITE, 0);
+
+    /* where DLC songs come from */
+    font_draw(r, "DLC songs come from an IPA that includes", 320, 330, 1.8f, dim, 0);
+    font_draw(r, "the DLC packs (\"All DLC Included\"): set the", 320, 362, 1.8f, dim, 0);
+    font_draw(r, "game up with it (make setup, --import-ipa).", 320, 394, 1.8f, dim, 0);
+
+    /* back (same hit area as the game's back button) */
+    SDL_FRect back = {17, 880, 129, 62};
+    SDL_SetRenderDrawColor(r, 55, 60, 72, 255);
+    SDL_RenderFillRectF(r, &back);
+    SDL_SetRenderDrawColor(r, 255, 255, 255, 200);
+    SDL_RenderDrawRectF(r, &back);
+    font_draw(r, "BACK", back.x + back.w / 2, back.y + back.h / 2 - 9, 2.4f, WHITE, 0);
+}
+
 static int option_event(UiState *u, const SDL_Event *e) {
     if (volume_drag_event(u, e)) return -1;
     bool click = e->type == SDL_MOUSEBUTTONUP && e->button.button == SDL_BUTTON_LEFT;
@@ -1018,7 +1146,7 @@ static int option_event(UiState *u, const SDL_Event *e) {
     bool back = back_event(u, e);   /* plays SE 8 itself */
     if (key && (k == SDLK_ESCAPE || k == SDLK_BACKSPACE)) { back = true; play_sound(u->as, SE_BACK); }
     if (back) {
-        if (u->opt_mode == OPT_MAIN) return SCENE_TITLE;
+        if (u->opt_mode == OPT_MAIN || u->opt_mode == OPT_DLC) return SCENE_TITLE;
         int from = u->opt_mode;
         opt_open(u, OPT_MAIN);
         for (int i = 0; i < 6; i++) if (k_opt_list[i] == from) u->opt_row = i;
@@ -1042,6 +1170,7 @@ static int option_event(UiState *u, const SDL_Event *e) {
         if (ok) { play_sound(u->as, SE_BUTTON); opt_open(u, k_opt_list[u->opt_row]); }   /* TouchCommonButton */
         return -1;
     }
+    if (u->opt_mode == OPT_DLC) return dlc_event(u, key, k, click, mx, my, ok);
     if (u->opt_mode == OPT_HELP && help_event(e)) return -1;   /* WindowHelpText scroll (+ keys) */
     int rows = opt_rows(u->opt_mode);
     if (key && k == SDLK_UP) u->opt_row = (u->opt_row + rows - 1) % rows;
@@ -1125,6 +1254,7 @@ static void render_option(UiState *u) {
     SDL_Renderer *r = u->ren;
     const Options *o = u->opt;
     const Atlas *u1 = &u->as->ui1, *u3 = &u->as->ui3, *u4 = &u->as->ui4;
+    if (u->opt_mode == OPT_DLC) { render_dlc(u); return; }   /* port page, own look and back button */
     spr_tl(r, &u->as->bg_options, "bg_options", 0, 0, 255);
     render_bgfx(u);   /* WindowOption has a WindowBGEffect child too */
     if (u->opt_mode != OPT_HELP && u->opt_mode != OPT_CREDITS) {
@@ -1516,11 +1646,11 @@ static void draw_quad(SDL_Renderer *r, SDL_Texture *tex, const SDL_Rect *src, in
    plus a 120-px reflection underneath */
 static void render_cover(UiState *u, int i) {
     Cover *c = &u->cov[i];
-    Atlas *m = music_atlas(u, i);
-    const Frame *f = music_frame(u, i, "art");
-    if (!m || !f || !m->tex) return;
     float cx = c->x - u->scr, cy = 293.0f + 158.0f, h = 158.0f;
-    if (cx < -200 || cx > LOGICAL_W + 200) return;
+    if (cx < -200 || cx > LOGICAL_W + 200) return;   /* before loading: off-screen covers need no art sheet */
+    const Frame *f = music_frame(u, i, "art");
+    Atlas *m = music_atlas(u, i);
+    if (!m || !f || !m->tex) return;
     float xl = cx - h + c->lx, xr = cx + h + c->rx;
     float lt = cy - h + c->ly, lb = cy + h - c->ly, rt = cy - h + c->ry, rb = cy + h - c->ry;
     float X[4] = {xl, xr, xr, xl}, Y[4] = {lt, rt, rb, lb}, V[4] = {0, 0, 1, 1};
@@ -1616,7 +1746,7 @@ static void render_select(UiState *u) {
     render_bgfx(u);
 
     /* cover flow, far covers first */
-    int n = u->gd->nsongs;
+    int n = nvis(u);
     for (int d = n; d >= 1; d--) {
         if (u->song - d >= 0) render_cover(u, u->song - d);
         if (u->song + d < n) render_cover(u, u->song + d);
@@ -1683,13 +1813,9 @@ static void render_select(UiState *u) {
 
 /* draw "art"/"logo" frame of a song top-left at (x,y) stretched to w x h */
 static void draw_music_frame_tl(UiState *u, int song, const char *kind, float x, float y, float w, float h) {
+    const Frame *f = music_frame(u, song, kind);
     Atlas *m = music_atlas(u, song);
-    Atlas *ref = load_music_slot(u, 1, "music_00_01");
-    if (!m || !ref) return;
-    char name[64];
-    snprintf(name, sizeof name, "%s_00_01_%02d", kind, song % 3);
-    const Frame *f = atlas_find(ref, name);
-    if (f) spr_tl_rect(u->ren, m, &f->r, x, y, w, h, 255);
+    if (m && f) spr_tl_rect(u->ren, m, &f->r, x, y, w, h, 255);
 }
 
 /* sprite scaled by rate about the centre of its full-size top-left rect (WindowResult m_FailSizeRate /

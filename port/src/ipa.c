@@ -10,14 +10,23 @@
  *   2. check free space, then extract the files the game loads (top-level
  *      .png .plist .usm .adx .caf of the app) into MikuFlick2.app.import/,
  *      verifying sizes and CRCs;
- *   3. swap the new folder in as MikuFlick2.app and gamedata.txt last, so a
+ *   3. DLC: IPAs that carry the game's data container (iMazing style,
+ *      Container/Library/InstallData/Mov_<pack>/ + Container/Documents/MikuFlick2.dat)
+ *      get the pack files flattened into the same folder, and the DLC song
+ *      table is read from that original save (dlc.c) and appended to gamedata.txt.
+ *      An IPA without DLC keeps the packs of the previous import (keep_dlc_songs);
+ *   4. swap the new folder in as MikuFlick2.app and gamedata.txt last, so a
  *      half-finished import never looks complete.
  *
  * Nothing is ever written outside `dir`. Archive paths with "..", absolute
  * paths or backslashes are refused.
+ *
+ * The archive is read through a ZipSrc (here a local fd), so the reader does not
+ * depend on where the archive is.
  */
 #define _FILE_OFFSET_BITS 64
 #include "mf.h"
+#include "dlc.h"
 #include "mfx.h"
 
 #include <dirent.h>
@@ -34,6 +43,7 @@
 
 #define APP_DIR "MikuFlick2.app"
 #define MAX_BINARY (64u << 20)
+#define MAX_SAVE (64u << 20)   /* original MikuFlick2.dat (1.5 MB with all DLC) */
 
 static void seterr(char *err, size_t n, const char *fmt, ...) {
     va_list ap;
@@ -61,10 +71,10 @@ static uint32_t crc_update(uint32_t crc, const uint8_t *p, size_t n) {
     return ~crc;
 }
 
-/* ---------------- buffered input over the archive fd ---------------- */
+/* ---------------- buffered input over the archive (ZipSrc: local file or HTTP ranges) ---------------- */
 
 typedef struct {
-    int fd;
+    const ZipSrc *src;
     uint64_t pos, end;      /* next file offset to read, end of this entry's data */
     size_t n, i;
     uint8_t buf[1 << 16];
@@ -75,16 +85,21 @@ static int in_byte(In *in) {
         if (in->pos >= in->end) return -1;
         uint64_t want = in->end - in->pos;
         if (want > sizeof in->buf) want = sizeof in->buf;
-        ssize_t r = pread(in->fd, in->buf, (size_t)want, (off_t)in->pos);
-        if (r <= 0) return -1;
-        in->n = (size_t)r;
+        if (!in->src->read(in->src->ud, in->pos, in->buf, (size_t)want)) return -1;
+        in->n = (size_t)want;
         in->i = 0;
-        in->pos += (uint64_t)r;
+        in->pos += want;
     }
     return in->buf[in->i++];
 }
 
-static bool read_at(int fd, uint64_t off, void *dst, size_t n) {
+static bool read_at(const ZipSrc *src, uint64_t off, void *dst, size_t n) {
+    return off <= src->size && n <= src->size - off && src->read(src->ud, off, dst, n);
+}
+
+/* local archive file */
+static bool fd_read(void *ud, uint64_t off, void *dst, size_t n) {
+    int fd = *(const int *)ud;
     uint8_t *d = dst;
     while (n) {
         ssize_t r = pread(fd, d, n, (off_t)off);
@@ -354,10 +369,11 @@ static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint64_t le64(const uint8_t *p) { return (uint64_t)le32(p) | (uint64_t)le32(p + 4) << 32; }
 
-static Entry *read_directory(int fd, uint64_t fsize, int *count, char *err, size_t errlen) {
+static Entry *read_directory(const ZipSrc *src, int *count, char *err, size_t errlen) {
+    uint64_t fsize = src->size;
     uint8_t tail[65557];
     size_t tn = fsize < sizeof tail ? (size_t)fsize : sizeof tail;
-    if (tn < 22 || !read_at(fd, fsize - tn, tail, tn)) { seterr(err, errlen, "This file is not a zip/IPA archive (or the download is incomplete)."); return NULL; }
+    if (tn < 22 || !read_at(src, fsize - tn, tail, tn)) { seterr(err, errlen, "This file is not a zip/IPA archive (or the download is incomplete)."); return NULL; }
     long e = -1;
     for (long i = (long)tn - 22; i >= 0; i--)
         if (le32(tail + i) == 0x06054b50u) { e = i; break; }
@@ -366,8 +382,8 @@ static Entry *read_directory(int fd, uint64_t fsize, int *count, char *err, size
     if (n == 0xffff || cdsize == 0xffffffffu || cdoff == 0xffffffffu) {   /* zip64 */
         uint8_t loc[20], rec[56];
         uint64_t eocd = fsize - tn + (uint64_t)e;
-        if (eocd < 20 || !read_at(fd, eocd - 20, loc, 20) || le32(loc) != 0x07064b50u ||
-            !read_at(fd, le64(loc + 8), rec, 56) || le32(rec) != 0x06064b50u) {
+        if (eocd < 20 || !read_at(src, eocd - 20, loc, 20) || le32(loc) != 0x07064b50u ||
+            !read_at(src, le64(loc + 8), rec, 56) || le32(rec) != 0x06064b50u) {
             seterr(err, errlen, "Unsupported zip archive.");
             return NULL;
         }
@@ -381,7 +397,7 @@ static Entry *read_directory(int fd, uint64_t fsize, int *count, char *err, size
     }
     uint8_t *cd = malloc((size_t)cdsize);
     Entry *ents = calloc((size_t)n, sizeof *ents);
-    if (!cd || !ents || !read_at(fd, cdoff, cd, (size_t)cdsize)) {
+    if (!cd || !ents || !read_at(src, cdoff, cd, (size_t)cdsize)) {
         free(cd);
         free(ents);
         seterr(err, errlen, "Could not read the archive.");
@@ -426,9 +442,10 @@ static Entry *read_directory(int fd, uint64_t fsize, int *count, char *err, size
 }
 
 /* where the entry's data starts (after its local header) */
-static bool data_offset(int fd, const Entry *e, uint64_t fsize, uint64_t *off) {
+static bool data_offset(const ZipSrc *src, const Entry *e, uint64_t *off) {
+    uint64_t fsize = src->size;
     uint8_t lh[30];
-    if (!read_at(fd, e->lho, lh, 30) || le32(lh) != 0x04034b50u) return false;
+    if (!read_at(src, e->lho, lh, 30) || le32(lh) != 0x04034b50u) return false;
     *off = e->lho + 30 + le16(lh + 26) + le16(lh + 28);
     return *off + e->csize <= fsize;
 }
@@ -471,7 +488,7 @@ static bool wanted(const char *rest) {
 typedef struct {
     FILE *f;
     uint8_t *mem;   /* binary into memory */
-    size_t mem_n;
+    size_t mem_n, mem_cap;
     IpaProgress cb;
     void *ud;
     const char *label;
@@ -482,6 +499,7 @@ typedef struct {
 static int sink(void *ud, const uint8_t *p, size_t n) {
     Job *j = ud;
     if (j->mem) {
+        if (n > j->mem_cap - j->mem_n) return 1;   /* more than the directory said */
         memcpy(j->mem + j->mem_n, p, n);
         j->mem_n += n;
     } else if (fwrite(p, 1, n, j->f) != n) {
@@ -496,19 +514,19 @@ static int sink(void *ud, const uint8_t *p, size_t n) {
     return 0;
 }
 
-static bool extract(int fd, uint64_t fsize, const Entry *e, Job *j, char *err, size_t errlen) {
+static bool extract(const ZipSrc *src, const Entry *e, Job *j, char *err, size_t errlen) {
     uint64_t off;
     if (e->method != 0 && e->method != 8) {
         seterr(err, errlen, "Unsupported compression in %s.", e->name);
         return false;
     }
-    if (!data_offset(fd, e, fsize, &off)) {
+    if (!data_offset(src, e, &off)) {
         seterr(err, errlen, "Damaged archive (%s).", e->name);
         return false;
     }
     In *in = malloc(sizeof *in);
     if (!in) { seterr(err, errlen, "Out of memory."); return false; }
-    in->fd = fd;
+    in->src = src;
     in->pos = off;
     in->end = off + e->csize;
     in->n = in->i = 0;
@@ -531,6 +549,75 @@ static bool extract(int fd, uint64_t fsize, const Entry *e, Job *j, char *err, s
     return true;
 }
 
+static bool have_in_dir(void *ud, const char *name) {
+    char path[1600];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/%s", (const char *)ud, name);
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+/* Inflates the original save into memory and appends its DLC songs (those whose files are now in
+   app_tmp) to gamedata. Returns the number of DLC songs; failures are logged, not fatal. */
+static int import_dlc_songs(const ZipSrc *src, const Entry *save_e, Job *j, const char *app_tmp, const char *gamedata) {
+    char why[256] = "";
+    int n = -1;
+    j->mem = malloc((size_t)save_e->usize);
+    j->mem_n = 0;
+    j->mem_cap = (size_t)save_e->usize;
+    j->label = "DLC song list";
+    if (!j->mem) snprintf(why, sizeof why, "out of memory");
+    else if (extract(src, save_e, j, why, sizeof why)) {
+        FILE *g = fopen(gamedata, "a");
+        if (!g) snprintf(why, sizeof why, "cannot append to %s", gamedata);
+        else {
+            n = dlc_write_songs(j->mem, j->mem_n, have_in_dir, (void *)app_tmp, g, why, sizeof why);
+            if (fclose(g) != 0 && n >= 0) { n = -1; snprintf(why, sizeof why, "could not write %s", gamedata); }
+        }
+    }
+    free(j->mem);
+    j->mem = NULL;
+    if (n < 0) { log_msg("import: DLC songs skipped (%s): %s", DLC_SAVE_PATH, why); return 0; }
+    return n;
+}
+
+/* move one file from the previous app folder into the new one (same file system, so a rename);
+   true if the new folder has it afterwards */
+static bool move_over(const char *old_app, const char *new_app, const char *name) {
+    char from[1600], to[1600];
+    snprintf(to, sizeof to, "%s/%s", new_app, name);
+    if (have_in_dir((void *)new_app, name)) return true;
+    snprintf(from, sizeof from, "%s/%s", old_app, name);
+    return rename(from, to) == 0;
+}
+
+/* Re-importing an IPA without DLC (e.g. the plain one) after a DLC import: carries the previous
+   DLC songs over (their "dlc" lines from the old gamedata.txt, their files from the old app
+   folder, which is still in place at this point) instead of dropping them. Returns the count. */
+static int keep_dlc_songs(const char *gd_old, const char *old_app, const char *new_app, const char *gd_new) {
+    FILE *in = fopen(gd_old, "r");
+    if (!in) return 0;
+    FILE *out = fopen(gd_new, "a");
+    if (!out) { fclose(in); return 0; }
+    char line[1024], pv[64], mv[64], atlas[64], name[80];
+    int n = 0;
+    while (fgets(line, sizeof line, in)) {
+        if (strncmp(line, "dlc ", 4) || !strchr(line, '\n') ||
+            sscanf(line + 4, "%*d %*d %*d %*d %63s %63s %63s", pv, mv, atlas) != 3)
+            continue;
+        if (strchr(pv, '/') || strchr(mv, '/') || strchr(atlas, '/')) continue;
+        snprintf(name, sizeof name, "%s.usm", mv);
+        bool ok = move_over(old_app, new_app, name);
+        snprintf(name, sizeof name, "%s.png", atlas);
+        ok = move_over(old_app, new_app, name) && ok;
+        if (strcmp(pv, "-")) { snprintf(name, sizeof name, "%s.adx", pv); move_over(old_app, new_app, name); }
+        if (ok && fputs(line, out) >= 0) n++;
+    }
+    fclose(in);
+    if (fclose(out) != 0) n = 0;
+    if (n) log_msg("import: kept %d DLC songs from the previous import", n);
+    return n;
+}
+
 bool ipa_import(int fd, const char *dir, IpaProgress cb, void *ud, char *err, size_t errlen) {
     crc_init();
     if (strlen(dir) > 1000) { seterr(err, errlen, "Storage path too long."); return false; }
@@ -539,9 +626,9 @@ bool ipa_import(int fd, const char *dir, IpaProgress cb, void *ud, char *err, si
         seterr(err, errlen, "Cannot read this file directly. Copy the IPA to the device's storage (e.g. Downloads) and pick it there.");
         return false;
     }
-    uint64_t fsize = (uint64_t)st.st_size;
+    ZipSrc local = {fd_read, &fd, (uint64_t)st.st_size}, *src = &local;
     int n = 0;
-    Entry *ents = read_directory(fd, fsize, &n, err, errlen);
+    Entry *ents = read_directory(src, &n, err, errlen);
     if (!ents) return false;
 
     /* locate Payload/<App>.app/<App> */
@@ -565,26 +652,52 @@ bool ipa_import(int fd, const char *dir, IpaProgress cb, void *ud, char *err, si
     }
     size_t plen = strlen(prefix);
 
-    uint64_t need_u = 0, total_c = bin->csize;
-    int nfiles = 0;
+    /* file name in MikuFlick2.app for each entry (NULL = skip): the app's own files, then the DLC
+       pack files flattened next to them unless the name is taken */
+    const char **out_name = calloc((size_t)n + 1, sizeof *out_name);
+    if (!out_name) { free(ents); seterr(err, errlen, "Out of memory."); return false; }
+    const Entry *save_e = NULL;
+    int nfiles = 0, ndlc_files = 0;
     for (int i = 0; i < n; i++)
         if (!strncmp(ents[i].name, prefix, plen) && wanted(ents[i].name + plen)) {
+            out_name[i] = ents[i].name + plen;
+            nfiles++;
+        }
+    for (int i = 0; i < n; i++) {
+        if (!strcmp(ents[i].name, DLC_SAVE_PATH) && ents[i].usize > 0 && ents[i].usize <= MAX_SAVE) save_e = &ents[i];
+        const char *dn = out_name[i] ? NULL : dlc_pack_file(ents[i].name);
+        bool taken = false;
+        for (int k = 0; dn && k < n && !taken; k++) taken = out_name[k] && !strcasecmp(out_name[k], dn);
+        if (dn && !taken) { out_name[i] = dn; ndlc_files++; }
+    }
+    if (ndlc_files && !save_e) {   /* no song table for them: leave the packs out */
+        log_msg("import: DLC packs found but no %s, skipping them", DLC_SAVE_PATH);
+        for (int i = 0; i < n; i++)
+            if (out_name[i] && dlc_pack_file(ents[i].name)) out_name[i] = NULL;
+        ndlc_files = 0;
+    }
+    if (!ndlc_files) save_e = NULL;
+
+    uint64_t need_u = 0, total_c = bin->csize + (save_e ? save_e->csize : 0);
+    for (int i = 0; i < n; i++)
+        if (out_name[i]) {
             need_u += ents[i].usize;
             total_c += ents[i].csize;
-            nfiles++;
         }
 
     char path[1600], tmp[1280], gd_tmp[1280];
     Job j = {.cb = cb, .ud = ud, .total_c = total_c};
     bool ok = false;
+    int ndlc = 0;
 
     /* 1. game binary -> gamedata.txt (checks the version before the big extraction) */
     if (bin->usize == 0 || bin->usize > MAX_BINARY) { seterr(err, errlen, "Unexpected game binary size."); goto out; }
     j.mem = malloc((size_t)bin->usize);
+    j.mem_cap = (size_t)bin->usize;
     if (!j.mem) { seterr(err, errlen, "Out of memory."); goto out; }
     j.label = "game binary";
     if (cb) cb(ud, 0, j.label);
-    if (!extract(fd, fsize, bin, &j, err, errlen)) goto out;
+    if (!extract(src, bin, &j, err, errlen)) goto out;
     mkdir(dir, 0755);
     snprintf(gd_tmp, sizeof gd_tmp, "%s/gamedata.txt.import", dir);
     FILE *g = fopen(gd_tmp, "w");
@@ -617,20 +730,23 @@ bool ipa_import(int fd, const char *dir, IpaProgress cb, void *ud, char *err, si
     if (mkdir(tmp, 0755) != 0) { remove(gd_tmp); seterr(err, errlen, "Cannot create %s (%s).", tmp, strerror(errno)); goto out; }
     for (int i = 0; i < n; i++) {
         const Entry *e = &ents[i];
-        if (strncmp(e->name, prefix, plen) || !wanted(e->name + plen)) continue;
-        snprintf(path, sizeof path, "%s/%s", tmp, e->name + plen);
+        if (!out_name[i]) continue;
+        snprintf(path, sizeof path, "%s/%s", tmp, out_name[i]);
         char *slash = strrchr(path, '/');   /* <lang>.lproj/ (the only wanted subfolders) */
         if (slash > path + strlen(tmp)) { *slash = 0; mkdir(path, 0755); *slash = '/'; }
         j.f = fopen(path, "wb");
         if (!j.f) { seterr(err, errlen, "Cannot write %s (%s).", path, strerror(errno)); goto fail_tmp; }
-        j.label = e->name + plen;
-        bool good = extract(fd, fsize, e, &j, err, errlen);
-        if (fclose(j.f) != 0 && good) { good = false; seterr(err, errlen, "Could not write %s (storage full?).", e->name + plen); }
+        j.label = out_name[i];
+        bool good = extract(src, e, &j, err, errlen);
+        if (fclose(j.f) != 0 && good) { good = false; seterr(err, errlen, "Could not write %s (storage full?).", out_name[i]); }
         j.f = NULL;
         if (!good) goto fail_tmp;
     }
 
-    /* 3. swap in: app folder first, gamedata.txt last */
+    /* 3. DLC song table from the original save; a bad save only loses the DLC, not the import */
+    if (save_e) ndlc = import_dlc_songs(src, save_e, &j, tmp, gd_tmp);
+
+    /* 4. swap in: app folder first, gamedata.txt last */
     char old[1600];
     snprintf(path, sizeof path, "%s/%s", dir, APP_DIR);
     snprintf(old, sizeof old, "%s/%s.old", dir, APP_DIR);
@@ -641,11 +757,17 @@ bool ipa_import(int fd, const char *dir, IpaProgress cb, void *ud, char *err, si
         seterr(err, errlen, "Cannot replace %s (%s).", path, strerror(errno));
         goto fail_tmp;
     }
+    if (!save_e) {   /* this IPA has no DLC: keep the packs of the previous import */
+        char gd_old[1280];
+        snprintf(gd_old, sizeof gd_old, "%s/gamedata.txt", dir);
+        ndlc = keep_dlc_songs(gd_old, old, path, gd_tmp);
+    }
     remove_tree(old);
     snprintf(path, sizeof path, "%s/gamedata.txt", dir);
     if (rename(gd_tmp, path) != 0) { seterr(err, errlen, "Cannot write %s (%s).", path, strerror(errno)); goto out; }
     if (cb) cb(ud, 1.0, "done");
-    log_msg("import: %d songs, %d files, %llu MB into %s", nsongs, nfiles, (unsigned long long)(need_u >> 20), dir);
+    log_msg("import: %d songs + %d DLC songs, %d files + %d DLC files, %llu MB into %s", nsongs, ndlc, nfiles, ndlc_files,
+            (unsigned long long)(need_u >> 20), dir);
     ok = true;
     goto out;
 
@@ -654,6 +776,7 @@ fail_tmp:
     remove(gd_tmp);
 out:
     free(j.mem);
+    free(out_name);
     free(ents);
     return ok;
 }

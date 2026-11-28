@@ -225,18 +225,19 @@ bool records_load_line(SaveData *s, const char *line) {
     return false;
 }
 
-void records_save_lines(const SaveData *s, FILE *f) {
+void records_save_lines(const SaveData *s, FILE *f) {   /* song field: save_song_key (save.c) */
+    char key[64];
     for (int i = 0; i < MAX_SONGS; i++)
         for (int d = 0; d < NUM_DIFF; d++) {
             const RecordEx *x = &s->recx[i][d];
-            if (!x->stored) continue;
-            fprintf(f, "recx %d %d %d %d %d %d %d %d %d %d %d %d %d\n", i, d, x->notes, x->stage, x->combo_score,
+            if (!x->stored || !save_song_key(s, i, key, sizeof key)) continue;
+            fprintf(f, "recx %s %d %d %d %d %d %d %d %d %d %d %d %d\n", key, d, x->notes, x->stage, x->combo_score,
                     x->interlude, x->perfect, x->result[0], x->result[1], x->result[2], x->result[3], x->result[4],
                     x->result[5]);
             for (int k = 0; k < NUM_KEYS; k++) {
                 const int *t = x->flick_total[k], *c = x->flick_success[k];
                 if (!(t[0] | t[1] | t[2] | t[3] | t[4] | c[0] | c[1] | c[2] | c[3] | c[4])) continue;
-                fprintf(f, "flk %d %d %d %d %d %d %d %d %d %d %d %d %d\n", i, d, k, t[0], t[1], t[2], t[3], t[4],
+                fprintf(f, "flk %s %d %d %d %d %d %d %d %d %d %d %d %d\n", key, d, k, t[0], t[1], t[2], t[3], t[4],
                         c[0], c[1], c[2], c[3], c[4]);
             }
         }
@@ -274,7 +275,7 @@ static void play_bgm03(Records *r) {
 }
 
 static int nsongs(const Records *r) {
-    int n = r->gd->nsongs;
+    int n = visible_songs(r->gd, r->opt);   /* DLC songs only while SHOW DLC SONGS is on */
     return n < 1 ? 1 : n > MAX_SONGS ? MAX_SONGS : n;
 }
 

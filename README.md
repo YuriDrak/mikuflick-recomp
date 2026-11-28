@@ -18,7 +18,7 @@ A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for
 - iOS app built from the same C sources: native Files picker for IPA import, scene-based lifecycle, automatic signing. See [`ios/README.md`](ios/README.md).
 - Headless modes for automated verification (`--autoplay`, `--autoplay-input`, screenshot and script modes).
 
-All 11 bundled songs and all five difficulties (Easy, Normal, Hard, Extreme, Break the Limit) are unlocked.
+All 11 bundled songs and all five difficulties (Easy, Normal, Hard, Extreme, Break the Limit) are unlocked. IPAs that carry the DLC packs (the iMazing-style "All DLC Included" package with a `Container/` folder) also give you the 63 DLC songs; see [DLC songs](#dlc-songs).
 
 ## Requirements
 
@@ -159,9 +159,19 @@ When a GitHub release is published, the same workflow sets the app's version fro
 - [`docs/re_notes.md`](docs/re_notes.md) — reverse-engineering notes: USM format, chart format, atlases, judgement/scoring formulas, scene state machine and rendering.
 - [`docs/archive_layout.md`](docs/archive_layout.md) — inventory of the original IPA and its binary.
 
+## DLC songs
+
+The original game downloaded its DLC packs from SEGA's server, which no longer exists. Some IPAs (for example the iMazing-style "All DLC Included" package) carry a `Container/` folder next to `Payload/`: the game's data folder from a device that owned the packs, with the unpacked packs in `Container/Library/InstallData/Mov_*/` and the original save `Container/Documents/MikuFlick2.dat`. That save is the only remaining copy of the DLC song list (titles, BPM, difficulty stars, file names).
+
+Both `make -C port setup IPA=…` and the importer (`--import-ipa`, **IMPORT IPA** on Android) pick these up automatically: the pack files go next to the app's files and the DLC songs are added to `gamedata.txt` from that save, after the 11 built-in songs. Packs whose files are missing are skipped. Importing an IPA without `Container/` afterwards keeps the DLC songs you already have (the importer moves them over). The full package needs about 7 GB of free space.
+
+The title menu's **DLC** button (the original SHOP slot) opens the DLC page: it shows how many packs and songs are installed, has a **SHOW DLC SONGS** ON/OFF switch (saved) that hides or shows them in music select and PV mode. On iOS and Android the page is a native screen of the system's own controls, with an **Import IPA with DLC** row to import a DLC IPA without reinstalling.
+
+High scores of DLC songs are saved by song (the song field of their `rec` lines in `save.txt` is the movie name), so they survive re-imports.
+
 ## Not included
 
-Shop/DLC, Game Center, Twitter, ads, replays, the collection and PV playlist editing. The DLC servers are long gone; only the songs bundled in the IPA are playable.
+The shop (buying DLC), Game Center, Twitter, ads, replays, the collection and PV playlist editing. The DLC servers are long gone; DLC songs come only from an IPA that already contains them (imported with it).
 
 ## Testing aids
 

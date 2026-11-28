@@ -1,6 +1,7 @@
 /* Minimal Apple binary property list (bplist00) reader -> tree of BpNode. */
-#include "mf.h"
+#include "bplist.h"
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -119,6 +120,13 @@ static BpNode *parse(Ctx *c, uint64_t ref) {
             n->n = k;
         }
         break;
+    case 0x8: {   /* UID: NSKeyedArchiver object reference */
+        unsigned k = (m & 0x0f) + 1u;
+        if (k > 8 || p + 1 + k > c->len) goto fail;
+        n->type = BP_UID;
+        n->i = (int64_t)ben(c->b + p + 1, k);
+        break;
+    }
     case 0xA:
         if (!count(c, &p, &cnt) || p + cnt * c->ref_size > c->len) goto fail;
         n->type = BP_ARRAY;

@@ -1008,7 +1008,7 @@ Game *game_create(SDL_Renderer *ren, Assets *as, const GameData *gd, const Optio
 
     char path[1024];
     snprintf(path, sizeof path, "%s/%s.usm", as->appdir, gd->songs[song].movie);
-    if (opt->pv_mode) pvview_begin(path, song, gd->nsongs);   /* WindowPVView init, or a ReLoad in place */
+    if (opt->pv_mode) pvview_begin(path, song, visible_songs(gd, opt));   /* WindowPVView init, or a ReLoad in place */
     if (!usm_read_cues(path, &g->cues) || g->cues.n == 0) {
         log_msg("no chart in %s", path);
         free(g);

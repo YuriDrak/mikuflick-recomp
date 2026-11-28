@@ -12,7 +12,7 @@ Debian/Ubuntu packages: `build-essential pkg-config libsdl2-dev libsdl2-image-de
 make -C port                                   # builds port/mikuflick
 make -C port setup IPA="/path/to/com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa"
 ```
-`setup` unpacks the IPA into `extracted/ipa/` (with an archive path-safety check) and writes `port/data/gamedata.txt`, which holds the song list, kana→key tables, judgement/score tables and the sound list read out of *your* `MikuFlick2` binary. It refuses any other build of the binary.
+`setup` unpacks the IPA into `extracted/ipa/` (with an archive path-safety check) and writes `port/data/gamedata.txt`, which holds the song list, kana→key tables, judgement/score tables and the sound list read out of *your* `MikuFlick2` binary. It refuses any other build of the binary. If the IPA carries the DLC (`Container/Library/InstallData/Mov_*/` plus `Container/Documents/MikuFlick2.dat`), `setup` links the pack files into the extracted app and adds the DLC songs from that original save (`src/dlc.c`); the importer below does the same.
 
 Without `unzip`, the game can import the IPA itself: `./port/mikuflick --import-ipa your.ipa --import-to DIR` (the same code as the Android app's Import IPA button, `src/ipa.c`) writes only the files the game loads to `DIR/MikuFlick2.app` plus `DIR/gamedata.txt`, with CRC checks; run with `--app DIR/MikuFlick2.app --gamedata DIR/gamedata.txt`.
 
@@ -45,7 +45,7 @@ Menus (on a touchscreen a tap works wherever a click does; the first finger driv
 
 | Screen | Mouse / touch | Keyboard |
 |---|---|---|
-| Logos / title | click to skip a logo, click "Touch to Start", then a menu button. RHYTHM GAME, PV and OPTIONS work; SHOP only plays its sound. The crown (bottom left) opens RESULTS | `Enter`; menu `Up`/`Down` + `Enter`; crown `Left` or `R` |
+| Logos / title | click to skip a logo, click "Touch to Start", then a menu button. RHYTHM GAME, PV and OPTIONS work; the SHOP slot opens the port's DLC page. The crown (bottom left) opens RESULTS | `Enter`; menu `Up`/`Down` + `Enter`; crown `Left` or `R` |
 | Music select | drag the cover flow sideways (anywhere in the band from the song logo down to the difficulty labels; the covers themselves are not buttons), click a difficulty, MODE CHANGE toggles Break the Limit, PLAY starts, Back | `Left`/`Right` song, `Up`/`Down` difficulty, `Enter` play, `Esc` back |
 | Result | click to skip the counters; Back, PLAY AGAIN; the FLICK RESULT button (right) toggles the per-key boards; click a board to show its directions, click it again to close | `Left`/`Right`/`Tab` toggle the page, `Up`/`Down` open the previous/next board, `Enter`/`Esc` back |
 | PV select | as music select, plus the LOOP / SHUFFLE / LYRICS / KARAOKE icons | `Left`/`Right` song, `Up`/`Down` + `Space` toggle an icon, `Enter` play, `Esc` back |
@@ -55,6 +55,7 @@ Menus (on a touchscreen a tap works wherever a click does; the first finger driv
 | CREDITS | ENDING (bottom right) plays the credits roll (about 110 s, not skippable, as in the original) and returns here | `Enter` |
 | RESULTS | RECORDS; LEADERBOARD / ACHIEVEMENTS only show that Game Center is not available; Back | `Up`/`Down` + `Enter`, `Esc` back |
 | RECORDS | swipe sideways or use the side arrows for the song, the arrows by the title for the difficulty, the FLICK RESULT button for the per-key page | `Left`/`Right` song, `Up`/`Down` difficulty, `Space`/`Tab` page, `Enter` next board on the flick page, `Esc` back |
+| DLC page (port) | SHOW DLC SONGS ON/OFF and the installed counts (iOS and Android show native screens instead, with an Import IPA with DLC row) | `Left`/`Right` toggle, `Enter`, `Esc` back |
 
 The Android build is described in `../android/README.md`. The iOS build is described in `../ios/README.md`.
 
@@ -72,7 +73,7 @@ Menu and result text uses **M+ 1p Bold** (`port/fonts/MPLUS1p-Bold.ttf`, SIL Ope
 
 ## Not included (see ../docs/linux_port_plan.md §6)
 
-Shop/DLC, Twitter, Game Center, ads, replays, the collection and PV playlist editing. All songs and difficulties are unlocked.
+The shop (buying DLC), Twitter, Game Center, ads, replays, the collection and PV playlist editing. All songs and difficulties are unlocked, including DLC songs imported from an IPA that contains them.
 
 ## Testing aids
 

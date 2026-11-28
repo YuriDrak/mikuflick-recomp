@@ -1,13 +1,13 @@
 /*
- * Native Android screens (android/.../MikuFlickActivity.java, ImportPage.java): the IPA import
- * screen is a page of plain Android views over the game instead of one drawn with SDL, like the
- * UIKit screens on iOS. The page only shows state and passes taps back; the logic stays here and in
- * main.c, on the SDL thread. While a page is up the game draws nothing, so the UI thread and the
- * GPU are left to the page.
+ * Native Android screens (android/.../MikuFlickActivity.java, ImportPage.java, DlcPage.java): the IPA
+ * import screen and the DLC page are pages of plain Android views over the game instead of screens
+ * drawn with SDL, like the UIKit screens on iOS. The page only shows state and passes taps back;
+ * the logic stays here and in main.c, on the SDL thread. While a page is up the game draws
+ * nothing, so the UI thread and the GPU are left to the page.
  *
- *   C -> Java: showPage / hidePage / importState (byte[] for text: JNI's NewStringUTF wants
- *              modified UTF-8, which file names need not be)
- *   Java -> C: takeAction() returns the page's next action ("later", "fd 42", "fdfail"), or null
+ *   C -> Java: showPage / hidePage / importState / dlcState (byte[] for text: JNI's NewStringUTF
+ *              wants modified UTF-8, which file names and song titles need not be)
+ *   Java -> C: takeAction() returns the page's next action ("later", "fd 42", "install 3", ...), or null
  */
 #include "mf.h"
 
@@ -84,6 +84,14 @@ void android_import_state(int phase, double frac, const char *file, const char *
     if (f && e) call("importState", "(II[B[B)V", NULL, (jint)phase, (jint)permille, f, e);
     if (f) (*env)->DeleteLocalRef(env, f);
     if (e) (*env)->DeleteLocalRef(env, e);
+}
+
+void android_dlc_state(const char *state, size_t len) {
+    JNIEnv *env = SDL_AndroidGetJNIEnv();
+    jbyteArray s = env ? bytes(env, state, len) : NULL;
+    if (!s) return;
+    call("dlcState", "([B)V", NULL, s);
+    (*env)->DeleteLocalRef(env, s);
 }
 #else
 typedef int android_c_unused;   /* ISO C: no empty translation units */
