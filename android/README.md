@@ -27,6 +27,8 @@ make -C android sdk         # installs NDK, CMake, platform 35, build-tools 35
 make -C android apk         # -> android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+GitHub Actions runs these same steps on every push and pull request (`.github/workflows/build.yml`, licences accepted with `yes`) and uploads the debug APK as a run artifact. It is signed with a debug key made on the runner for that run, so a CI APK only installs over another after an uninstall.
+
 The debug APK contains `arm64-v8a`, `armeabi-v7a` and `x86_64` libraries
 (16 KB page aligned), targets API 35 and needs Android 7.0 (API 24) or newer.
 
@@ -37,7 +39,7 @@ it). On first start the app shows **Game data needed**:
 
 1. Copy your own decrypted `com.sega.MikuFlick02-iOS5.0-(Clutch-2.0.4).ipa`
    (v1.1.5) to the phone, e.g. into Downloads.
-2. Tap **IMPORT IPA** and pick it in the system file picker.
+2. Tap **Import IPA** and pick it in the system file picker.
 3. The app checks the game version first (only v1.1.5 armv7 is accepted), then
    extracts the files it uses (about 980 MB; it checks that there is enough
    free space) and builds `gamedata.txt`. It takes a minute or two.
@@ -69,8 +71,8 @@ uninstalled.
 - The flick board takes multi-touch, as on iOS. Menus, the pause button
   (bottom right), the pause menu and the PV viewer react to taps.
 - Tall (or wide) screens keep the original 2:3 layout centred, so every key
-  stays where it was on iOS; the bars around it show a blurred copy of the
-  song video (or of the menu).
+  stays where it was on iOS; the bars around it are black during a song and
+  show a dim, blurred copy of the menu elsewhere.
 - The **Back** button works like Esc: cancel in menus, pause during a song,
   leave the PV viewer, and exit from the title screen.
 - Leaving the app during a song opens the pause menu.
@@ -104,7 +106,9 @@ file providers. Not measured yet: audio latency on different phones.
 | `SHA256SUMS` | checksums of the downloaded SDL source releases, command-line tools and Gradle |
 | `app/build.gradle` | AGP 8.7 app module: SDK levels, ABIs, CMake, SDL Java sources, font assets |
 | `app/jni/CMakeLists.txt` | builds SDL2, SDL2_image (stb PNG), SDL2_ttf (bundled FreeType) and `libmain.so` |
-| `app/src/main/java/.../MikuFlickActivity.java` | `SDLActivity` subclass: library list, intent arguments, system file picker for the IPA (fd passed to `port/src/ipa.c`) |
+| `app/src/main/java/.../MikuFlickActivity.java` | `SDLActivity` subclass: library list, intent arguments, native pages over the game (`port/src/android.c`), system file picker for the IPA (fd passed to `port/src/ipa.c`) |
+| `app/src/main/java/.../NativePage.java`, `ImportPage.java` | native screens of plain framework views (device theme, Android 7+): the IPA import screen, the counterpart of `ios/App/ImportViewController.m` |
+| `app/src/main/res/drawable/` | Material icons (Apache 2.0) for those screens |
 | `app/src/main/AndroidManifest.xml` | portrait, fullscreen, no permissions |
 | `../ios/` | iOS port: CMake/Makefile, native Files picker, scene-based lifecycle |
 

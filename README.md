@@ -13,7 +13,7 @@ A clean-room C11/SDL2 reimplementation of *Miku Flick/02* (SEGA, iOS v1.1.5) for
 - Streaming MPEG-1 video and two ADX audio tracks (vocals + backing) decoded directly from the original `.usm` files by built-in decoders (no FFmpeg needed).
 - Result screen with ranks and the per-key FLICK RESULT page; RESULTS / RECORDS (from the title's crown) with your best score per song and difficulty; a persistent local save file.
 - Mouse and multi-touch flick input, keyboard equivalents for every screen, input-timing calibration, fullscreen and volume controls.
-- Any screen shape: the original 2:3 layout stays centred (keys exactly where they were on iOS), and the bars on tall phones or wide monitors show a blurred copy of the video or menu.
+- Any screen shape: the original 2:3 layout stays centred (keys exactly where they were on iOS), and the bars on wide monitors show a blurred copy of the video or menu (on phones: black during a song, a dim blur of the menu elsewhere).
 - Android app (APK) built from the same C sources: touch, Back button, pause when the app is left. See [`android/README.md`](android/README.md).
 - iOS app built from the same C sources: native Files picker for IPA import, scene-based lifecycle, automatic signing. See [`ios/README.md`](ios/README.md).
 - Headless modes for automated verification (`--autoplay`, `--autoplay-input`, screenshot and script modes).
@@ -29,7 +29,7 @@ sudo apt install build-essential pkg-config \
   libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
 ```
 
-`unzip` is used by the one-time `setup` step; the built-in importer (`--import-ipa`, or **IMPORT IPA** in the Android app) does not need it. The Android build has its own requirements (JDK 17+, about 4 GB of disk for the SDK/NDK it downloads into the project); see [`android/README.md`](android/README.md).
+`unzip` is used by the one-time `setup` step; the built-in importer (`--import-ipa`, or **Import IPA** in the Android app) does not need it. The Android build has its own requirements (JDK 17+, about 4 GB of disk for the SDK/NDK it downloads into the project); see [`android/README.md`](android/README.md).
 
 ## Build and set up
 
@@ -100,7 +100,7 @@ See [`port/README.md`](port/README.md) for the full control and UI description.
 
 ## Android
 
-The same sources build into an Android app (arm64-v8a, armeabi-v7a, x86_64; Android 7.0+). The `android/Makefile` downloads the SDK, NDK, Gradle and SDL sources into the project (gitignored). On the phone, the app imports your own IPA itself: copy the `.ipa` to the phone, tap **IMPORT IPA** on the first start and pick it. No PC is needed for that step.
+The same sources build into an Android app (arm64-v8a, armeabi-v7a, x86_64; Android 7.0+). The `android/Makefile` downloads the SDK, NDK, Gradle and SDL sources into the project (gitignored). On the phone, the app imports your own IPA itself: copy the `.ipa` to the phone, tap **Import IPA** on the first start and pick it. No PC is needed for that step.
 
 ```sh
 make -C android toolchain        # downloads into android/third_party/
@@ -129,6 +129,12 @@ open ios/build/iphoneos/MikuFlick.xcodeproj
 
 Then select your device in Xcode and run. Details: [`ios/README.md`](ios/README.md).
 
+## Builds from CI
+
+Every push and pull request runs `.github/workflows/build.yml` on GitHub Actions, which builds the Linux port, an **unsigned iOS IPA** (`MikuFlick-unsigned.ipa`, Release, arm64) and an Android **debug APK**. Download them from the run's **Artifacts** section. Sign the IPA yourself (your own certificate or a sideloading app) before installing it. The debug APK is signed with a key made on the runner for each run, so uninstall the previous one before installing another (your imported data goes with it). Like the source, these builds contain no game data: the app asks for your own IPA on first start.
+
+When a GitHub release is published, the same workflow sets the app's version from the release tag and attaches `MikuFlick.ipa` and an AltSource, `altsource.json` (made by `ios/altsource.sh`), to the release. To install and update the iOS app from AltStore, SideStore or Feather, add this source: `https://github.com/YuriDrak/mikuflick-recomp/releases/latest/download/altsource.json`. The app is re-signed on your device by that app.
+
 ## Repository layout
 
 | Path | Contents |
@@ -137,6 +143,7 @@ Then select your device in Xcode and run. Details: [`ios/README.md`](ios/README.
 | `android/` | Android build: Gradle/CMake project, `Makefile` that fetches the toolchain into `android/third_party/` (ignored), README. |
 | `ios/` | iOS build: CMake/Makefile project, Objective-C bridge, native Files picker for IPA import, README. |
 | `docs/` | Reverse-engineering notes, the port design plan and the original IPA archive inventory. |
+| `.github/workflows/` | CI: builds the Linux port, the unsigned iOS IPA and the Android debug APK (see [Builds from CI](#builds-from-ci)). |
 | `tools/` | Self-contained C utilities and scripts used during analysis (`machoinfo`, `usmdump`, `bplist2json`, `mfextract`, Ghidra helpers, IPA extractor). `mfextract` shares the table reader in `port/src/mfx.c`. |
 | `CLAUDE.md` | Agent operational rules and the current project status. |
 | `extracted/` | *Ignored.* Your extracted game bundle, created by `make setup`. |

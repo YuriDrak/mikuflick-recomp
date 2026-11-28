@@ -4,7 +4,8 @@
  * the window, keeping the original layout and touch positions. On screens that
  * are taller (most phones) or wider than 2:3, the bars around it are filled
  * with a blurred, darkened copy of the backdrop - the song video in game, the
- * scene itself in the menus - instead of black.
+ * scene itself in the menus - instead of black. On phones (iOS, Android) the
+ * bars stay black in game and the menu blur is dimmer.
  *
  * Window/touch coordinates are mapped back to the 640x960 space through the
  * same rectangle (view_window_to_logical). If render targets are unavailable
@@ -85,9 +86,9 @@ void view_present(SDL_Renderer *ren, SDL_Texture *backdrop) {
     if (!V.ok) { SDL_RenderPresent(ren); return; }
     update_layout(ren);
     bool bars = V.dst.w < V.out_w - 1 || V.dst.h < V.out_h - 1;
-#ifdef MF_IOS
-    /* OLED phones: pure black bars during rhythm gameplay so moving blur never distracts,
-       and a subtle dim blur only on menus. */
+#if defined(MF_IOS) || defined(__ANDROID__)
+    /* phones (mostly OLED): pure black bars during rhythm gameplay so moving blur never distracts,
+       and a subtle dim blur only on menus */
     bool draw_blur = bars && !backdrop;
     const Uint8 blur_mod = 48;
 #else

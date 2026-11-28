@@ -216,62 +216,6 @@ static bool import_screen(SDL_Renderer *ren, const char *files_dir, bool update)
     return ios_import_screen(SDL_RenderGetWindow(ren), files_dir, update);
 }
 #elif defined(__ANDROID__)
-/* greedy word wrap into up to max lines of at most cols bytes (breaks after ' ' or '/') */
-static int wrap_text(const char *s, int cols, char out[][96], int max) {
-    int n = 0;
-    while (*s && n < max) {
-        while (*s == ' ') s++;
-        int len = (int)strlen(s), cut = len;
-        if (len > cols) {
-            cut = cols;
-            while (cut > cols / 3 && s[cut - 1] != ' ' && s[cut - 1] != '/') cut--;
-            if (cut <= cols / 3) cut = cols;
-            while (cut < len && ((unsigned char)s[cut] & 0xc0) == 0x80) cut++;   /* keep UTF-8 whole */
-        }
-        snprintf(out[n++], 96, "%.*s", cut, s);
-        s += cut;
-    }
-    return n;
-}
-
-#include <jni.h>
-
-/* MikuFlickActivity.pickIpa() opens the system file picker; takePickedFd() returns
-   -1 while it is open, -2 if cancelled, else a readable fd for the chosen file. */
-static bool jni_call_void(const char *name) {
-    JNIEnv *env = SDL_AndroidGetJNIEnv();
-    jobject act = SDL_AndroidGetActivity();
-    if (!env || !act) return false;
-    jclass cls = (*env)->GetObjectClass(env, act);
-    jmethodID m = (*env)->GetMethodID(env, cls, name, "()V");
-    bool ok = m != NULL;
-    if (ok) (*env)->CallVoidMethod(env, act, m);
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); ok = false; }
-    (*env)->DeleteLocalRef(env, cls);
-    (*env)->DeleteLocalRef(env, act);
-    return ok;
-}
-
-static int jni_call_int(const char *name) {
-    JNIEnv *env = SDL_AndroidGetJNIEnv();
-    jobject act = SDL_AndroidGetActivity();
-    if (!env || !act) return -2;
-    jclass cls = (*env)->GetObjectClass(env, act);
-    jmethodID m = (*env)->GetMethodID(env, cls, name, "()I");
-    int r = m ? (*env)->CallIntMethod(env, act, m) : -2;
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); r = -2; }
-    (*env)->DeleteLocalRef(env, cls);
-    (*env)->DeleteLocalRef(env, act);
-    return r;
-}
-
-static bool pick_ipa(SDL_Renderer *renderer) {
-    (void)renderer;
-    return jni_call_void("pickIpa");
-}
-
-static int take_picked_fd(void) { return jni_call_int("takePickedFd"); }
-
 typedef struct {
     SDL_mutex *mu;
     double frac;
@@ -305,141 +249,77 @@ static int SDLCALL import_thread(void *ud) {
     return 0;
 }
 
-typedef struct { float x, y, w, h; const char *label; } Button;
-
-static void draw_button(SDL_Renderer *ren, const Button *b, bool primary) {
-    SDL_FRect r = {b->x, b->y, b->w, b->h};
-    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-    if (primary) SDL_SetRenderDrawColor(ren, 27, 181, 176, 255);
-    else SDL_SetRenderDrawColor(ren, 55, 60, 72, 255);
-    SDL_RenderFillRectF(ren, &r);
-    SDL_SetRenderDrawColor(ren, 255, 255, 255, 180);
-    SDL_RenderDrawRectF(ren, &r);
-    font_draw(ren, b->label, b->x + b->w / 2, b->y + b->h / 2 - 14, 2.6f, (SDL_Color){255, 255, 255, 255}, 0);
-}
-
-static bool hit(const Button *b, float x, float y) {
-    return x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h;
-}
-
 /* Shown while the user's game data is missing: imports their own IPA in the app.
-   Returns true once an import has succeeded, false if the player quits. */
-/* update: the data is there but outdated (data_current); NOT NOW keeps it and returns false */
+   Returns true once an import has succeeded, false if the player quits. update: the data is
+   there but outdated (data_current), NOT NOW keeps it and returns false without importing.
+   The page is native (ImportPage.java, through android.c): it picks the file and hands over its
+   descriptor ("fd N"); the import runs here on a worker thread and the page shows its progress. */
 static bool import_screen(SDL_Renderer *ren, const char *files_dir, bool update) {
-    enum { PROMPT, PICKING, IMPORTING, FAILED } phase = PROMPT;
+    (void)ren;
     ImportJob *job = calloc(1, sizeof *job);   /* heap: a detached worker may outlive this screen */
     if (!job || !(job->mu = SDL_CreateMutex())) { free(job); return false; }
     job->dir = files_dir;
     job->fd = -1;
     SDL_Thread *th = NULL;
-    const Button import_btn = {120, 600, 400, 96, "IMPORT IPA"}, retry_btn = {120, 600, 400, 96, "TRY AGAIN"};
-    const Button quit_btn = {170, 730, 300, 80, update ? "NOT NOW" : "QUIT"};
-    const char *instructions = update ? "This version also reads the help text and the ending credits from your IPA. "
-                                        "Import it once more to add them; your scores and options are kept."
-                                      : "This app contains no game data. Import your own decrypted Miku Flick/02 IPA "
-                                        "(iOS v1.1.5) from this device; the app extracts what it needs (about 1 GB of "
-                                        "free space). The IPA itself can be deleted afterwards.";
-    SDL_Color white = {255, 255, 255, 255}, dim = {170, 180, 190, 255}, teal = {120, 230, 220, 255};
-    char lines[16][96];
-    char path_lines[6][96];
-    int npath = wrap_text(files_dir, 40, path_lines, 6);
-    char err_copy[320] = "";
-    bool result = false;
+    bool result = false, importing = false;
+    int shown_permille = -1;
+    char shown_file[96] = "";
+    if (!android_page_show(ANDROID_PAGE_IMPORT, update ? 1 : 0, files_dir)) {
+        log_msg("import: the import page could not be shown");
+        goto done;
+    }
+    android_import_state(ANDROID_IMPORT_PROMPT, 0, NULL, NULL);
 
     for (;;) {
         SDL_Event e;
-        float tx = -1, ty = -1;
-        bool back = false;
-        while (SDL_PollEvent(&e)) {
+        while (SDL_PollEvent(&e))
             if (e.type == SDL_QUIT || e.type == SDL_APP_TERMINATING) goto done;
-            if (e.type == SDL_KEYDOWN && (e.key.keysym.sym == SDLK_AC_BACK || e.key.keysym.sym == SDLK_ESCAPE)) back = true;
-            map_mouse(ren, &e);
-            SDL_Event m;
-            if (finger_to_mouse(ren, &e, &m)) e = m;
-            if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
-                tx = (float)e.button.x;
-                ty = (float)e.button.y;
-            }
-        }
-
-        if (phase == PROMPT || phase == FAILED) {
-            if (back || hit(&quit_btn, tx, ty)) goto done;
-            if (hit(&import_btn, tx, ty)) {   /* same rectangle as TRY AGAIN */
-                if (pick_ipa(ren)) phase = PICKING;
-                else { snprintf(err_copy, sizeof err_copy, "Could not open the file picker."); phase = FAILED; }
-            }
-        } else if (phase == PICKING) {
-            int fd = take_picked_fd();
-            if (fd == -2) phase = PROMPT;
-            else if (fd == -3) {
-                snprintf(err_copy, sizeof err_copy, "Could not read the selected file. Try a local copy in Files.");
-                phase = FAILED;
-            } else if (fd >= 0) {
-                job->fd = fd;
+        char act[64];
+        while (android_page_action(act, sizeof act)) {
+            if (importing) continue;   /* the page shows no buttons meanwhile */
+            if (!strcmp(act, "later")) goto done;   /* NOT NOW, or Back (on the first start: quit) */
+            if (!strcmp(act, "fdfail")) {
+                android_import_state(ANDROID_IMPORT_FAILED, 0, NULL, "Could not read the selected file. Try a copy in Downloads.");
+            } else if (!strncmp(act, "fd ", 3)) {
+                job->fd = atoi(act + 3);
                 job->state = 0;
                 job->frac = 0;
                 job->file[0] = 0;
                 th = SDL_CreateThread(import_thread, "ipa-import", job);
-                if (th) phase = IMPORTING;
-                else { close(fd); snprintf(err_copy, sizeof err_copy, "Could not start the import."); phase = FAILED; }
+                if (th) {
+                    importing = true;
+                    shown_permille = -1;
+                    shown_file[0] = 0;
+                    android_import_state(ANDROID_IMPORT_RUNNING, 0, NULL, NULL);
+                } else {
+                    close(job->fd);
+                    android_import_state(ANDROID_IMPORT_FAILED, 0, NULL, "Could not start the import.");
+                }
             }
-        } else {
+        }
+        if (importing) {
             SDL_LockMutex(job->mu);
-            int st = job->state;
-            if (st < 0) snprintf(err_copy, sizeof err_copy, "%s", job->err);
+            int st = job->state, permille = (int)(job->frac * 1000.0 + 0.5);
+            char file[96], err[320];
+            snprintf(file, sizeof file, "%s", job->file);
+            snprintf(err, sizeof err, "%s", job->err);
             SDL_UnlockMutex(job->mu);
             if (st != 0) {
                 SDL_WaitThread(th, NULL);
                 th = NULL;
+                importing = false;
                 if (st > 0) { result = true; goto done; }
-                phase = FAILED;
+                android_import_state(ANDROID_IMPORT_FAILED, 0, NULL, err[0] ? err : "The import failed.");
+            } else if (permille != shown_permille || strcmp(file, shown_file)) {   /* only what changed */
+                shown_permille = permille;
+                snprintf(shown_file, sizeof shown_file, "%s", file);
+                android_import_state(ANDROID_IMPORT_RUNNING, permille / 1000.0, file, NULL);
             }
         }
-
-        view_begin(ren);
-        SDL_SetRenderDrawColor(ren, 12, 16, 24, 255);
-        SDL_RenderClear(ren);
-        font_draw(ren, "Miku Flick/02", LOGICAL_W / 2, 110, 4.0f, teal, 0);
-        if (phase == PROMPT || phase == PICKING) {
-            font_draw(ren, update ? "Game data update" : "Game data needed", LOGICAL_W / 2, 220, 3.2f, white, 0);
-            int n = wrap_text(instructions, 44, lines, 16);
-            for (int i = 0; i < n; i++) font_draw(ren, lines[i], LOGICAL_W / 2, 300 + i * 34, 2.0f, white, 0);
-            if (phase == PICKING) {
-                font_draw(ren, "Choose the IPA file...", LOGICAL_W / 2, 630, 2.6f, teal, 0);
-            } else {
-                draw_button(ren, &import_btn, true);
-                draw_button(ren, &quit_btn, false);
-            }
-            font_draw(ren, "Or copy MikuFlick2.app and gamedata.txt to:", LOGICAL_W / 2, 836, 1.6f, dim, 0);
-            for (int i = 0; i < npath; i++) font_draw(ren, path_lines[i], LOGICAL_W / 2, 866 + i * 26, 1.6f, dim, 0);
-        } else if (phase == IMPORTING) {
-            SDL_LockMutex(job->mu);
-            double frac = job->frac;
-            char file[96];
-            snprintf(file, sizeof file, "%s", job->file);
-            SDL_UnlockMutex(job->mu);
-            font_draw(ren, "Importing...", LOGICAL_W / 2, 300, 3.2f, white, 0);
-            SDL_FRect bar = {80, 460, 480, 36}, fill = {80, 460, (float)(480 * (frac < 0 ? 0 : frac > 1 ? 1 : frac)), 36};
-            SDL_SetRenderDrawColor(ren, 55, 60, 72, 255);
-            SDL_RenderFillRectF(ren, &bar);
-            SDL_SetRenderDrawColor(ren, 27, 181, 176, 255);
-            SDL_RenderFillRectF(ren, &fill);
-            char pct[16];
-            snprintf(pct, sizeof pct, "%d%%", (int)(frac * 100 + 0.5));
-            font_draw(ren, pct, LOGICAL_W / 2, 520, 2.6f, white, 0);
-            font_draw(ren, file, LOGICAL_W / 2, 580, 1.8f, dim, 0);
-            font_draw(ren, "Keep the app open. This takes a few minutes.", LOGICAL_W / 2, 700, 2.0f, white, 0);
-        } else {
-            font_draw(ren, "Import failed", LOGICAL_W / 2, 220, 3.2f, white, 0);
-            int n = wrap_text(err_copy, 44, lines, 9);
-            for (int i = 0; i < n; i++) font_draw(ren, lines[i], LOGICAL_W / 2, 300 + i * 34, 2.0f, white, 0);
-            draw_button(ren, &retry_btn, true);
-            draw_button(ren, &quit_btn, false);
-        }
-        view_present(ren, NULL);
-        SDL_Delay(16);
+        SDL_Delay(16);   /* nothing to draw: the page is on top */
     }
 done:
+    android_page_hide();
     if (th) {   /* quitting mid-import: don't block on it; the next import starts from scratch */
         SDL_LockMutex(job->mu);
         bool running = job->state == 0;
@@ -499,6 +379,9 @@ int main(int argc, char **argv) {
     SDL_Keycode script_key[64];
     Uint32 prog_start = 0;
     bool start_credits = false;   /* --start-scene credits: OPTIONS -> CREDITS page */
+#if defined(__ANDROID__) || defined(MF_IOS)
+    int start_import = -1;   /* --start-scene import|import-update: the import screen as on a first start / an old install */
+#endif
     int win_w = 480, win_h = 720;
 
 #if defined(__ANDROID__) || defined(MF_IOS)
@@ -587,6 +470,10 @@ int main(int argc, char **argv) {
             else if (!strcmp(v, "credits")) { start_scene = SCENE_OPTION; start_credits = true; }
             if (!strcmp(v, "scores")) start_scene = SCENE_SCORE;   /* RECORDS: RESULTS menu / RECORDS screen */
             if (!strcmp(v, "records")) start_scene = SCENE_RECORD;
+#if defined(__ANDROID__) || defined(MF_IOS)
+            if (!strcmp(v, "import")) start_import = 0;
+            else if (!strcmp(v, "import-update")) start_import = 1;
+#endif
             i++;
         }
         else if (!strcmp(a, "--help") || !strcmp(a, "-h")) { usage(); return 0; }
@@ -643,6 +530,7 @@ int main(int argc, char **argv) {
     while (!(data_ready(appdir) && gamedata_load(&gd, gamedata)))
         if (!import_screen(ren, mobile_files, false)) return 1;
     if (!data_current(appdir, &gd) && import_screen(ren, mobile_files, true) && !gamedata_load(&gd, gamedata)) return 1;
+    if (start_import >= 0 && import_screen(ren, mobile_files, start_import == 1) && !gamedata_load(&gd, gamedata)) return 1;   /* testing */
     if (opt.start_song >= gd.nsongs) opt.start_song = -1;
 #endif
 

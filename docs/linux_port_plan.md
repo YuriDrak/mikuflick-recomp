@@ -41,6 +41,7 @@ The `ending` lines are optional: they are written only when all 76 rows decode, 
 | `src/bplist.c` | bplist00 reader (atlases) |
 | `src/atlas.c` | PNG textures (SDL_image) + atlas frame lookup + sprite drawing |
 | `src/ipa.c` | in-app IPA importer: zip central directory, inflate + CRC-32, app-version check, selective extraction, progress callback |
+| `src/android.c` | Android only: JNI glue for the native pages over the game (import screen, `android/.../ImportPage.java`) |
 | `src/mfx.c` | game tables read from the user's `MikuFlick2` binary (shared by `tools/mfextract` and `ipa.c`) |
 | `src/usm.c` | USM chunk walker + `@UTF` reader → cue list |
 | `src/media.c` | own ADX + IMA4 decoders: whole-file audio decode to S16 stereo 44.1 kHz (per stream), streaming MPEG-1 video (pl_mpeg, `src/pl_mpeg_impl.c`) |
@@ -52,7 +53,7 @@ The `ending` lines are optional: they are written only when all 76 rows decode, 
 | `src/help.c` | `Localizable.strings` lookup, OPTIONS → HELP pages (`WindowHelpText`) and localized option titles |
 | `src/ending.c` | credits roll (`WindowEnding`) and the ending movie (`ScenePreEnding`) |
 | `src/records.c` | title crown → RESULTS (`WindowScore`) → RECORDS (`WindowRecord`), extended record save lines |
-| `src/text.c` | SDL_ttf text drawing (M+ font) with the bitmap-font fallback |
+| `src/text.c` | SDL_ttf text drawing (M+ font, read into memory once: a compressed APK asset is very slow to seek) with the bitmap-font fallback |
 | `src/save.c` | high scores / clear flags, options, per-song input timing |
 | `src/view.c` | 640×960 render target shown centred and scaled to fit; bars of non-2:3 screens filled with a blurred backdrop (video in game); window/touch → 640×960 mapping |
 
@@ -93,6 +94,7 @@ Touches in the original are UIKit points (320×480); the port converts its 640×
 * **Pause button cut-off:** the original refuses the pause once the movie's last frame is reached; the port refuses it in the last 2 s.
 * **RECORDS:** lists every song in music-select order with all 5 difficulties; the touch slop before arrows hide is 4 px; the background cubes are not drawn; stars are skipped on a Break the Limit page (the original tests the difficulty last played).
 * Keyboard equivalents exist for every touch gesture (see `port/README.md`); the original is touch only.
+* **Movie deblocking:** the movies are 320×480 MPEG-1 at a low bit rate, drawn 2× or more, so the original shows 8×8 block tiles in smooth areas. The port runs a deblocking post-filter on each shown frame (`media.c`: at each block edge with smooth sides the jump is spread as a linear ramp over 8 pixels, thresholds from the picture's quantizer, which a small pl_mpeg patch reports). `MF_NO_DEBLOCK=1` shows the frames as decoded.
 * Lyric-line telops (op 3) are only shown in PV mode in the original, so the core game does not need a text font.
 * Menu layouts and timings are taken from the binary (re_notes §6); the remaining visual differences are listed in re_notes §6.9.
 
@@ -118,6 +120,7 @@ Headless checks (`SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy`, real-time au
 | `mfextract` with the ending table | 76 `ending` lines, every other line unchanged | 76 lines; the rest identical to the previous `gamedata.txt`; with an old `gamedata.txt` the ENDING button is hidden and a log line asks to rerun setup |
 | OPTIONS → CREDITS → ENDING round trip, headless | roll ≈ 100.7 s, hold, BGM fade, back to CREDITS through the loading screen | ran end to end in one ~117 s run; `--start-scene movie` starts 激唱 Extreme ≈ 9.5 s in |
 | PV view, scripted mouse drags | tap does nothing, > 320 px drag changes PV, pause button, RESUME, RETRY fade-in, MUSIC SELECT | as expected (screenshots); a natural movie end with LOOP/SHUFFLE was not run headless (same code path as a swipe reload) |
+| Movie deblocking, カンタレラ 170 s / 183 s frames with and without `MF_NO_DEBLOCK` | tiles in skin and floor gone, edges and texture kept | as expected (block steps of the face close-up removed; stair-stepped hair edges remain, that detail is not in the stream) |
 
 Caveat: if three instances share the CPU under the software renderer, frame times exceed the 33 ms tick and synthetic presses land late. The game samples input once per frame (the original runs at 30 fps), so play quality depends on the frame rate. With a GPU renderer and vsync this is not an issue.
 
@@ -152,6 +155,6 @@ The Android build (`android/`, see `android/README.md`) compiles the same `port/
 * `media.c` decodes ADX (encoding 3, coefficients from the high-pass cutoff, as in FFmpeg's `adpcm_adx`) and Apple IMA4 in CAF, and feeds the MPEG-1 video to **pl_mpeg**.
 * The USM video uses an **11-bit intra DC precision** (`VIDEO_HDRINFO.mpeg_dcprec = 11`; the stream's user data says `TMPGEXS … IDCPREC … 3`). That is an MPEG-2 feature inside an MPEG-1 stream. FFmpeg detects the TMPGEnc marker; stock pl_mpeg does not and produces block garbage, so the vendored copy is patched (DC size codes up to 11 bits, predictor reset `128 << p`, DC scale `8 >> p`) and `media.c` sets the precision from the USM header.
 * Android specifics in `main.c`: data paths from `SDL_AndroidGetExternalStoragePath()` / internal storage, an on-screen message when data is missing, the first finger turned into pointer events for menus (the board keeps raw multi-touch), Back → Esc, pause and save on `SDL_APP_WILLENTERBACKGROUND`. `game.c` judges an input at the song time of its event timestamp rather than at the last frame update.
-* Screen fill (`view.c`): scenes render into a 640×960 target that is shown centred. On tall phones the bars get a blurred, darkened copy of the video (two linear downscales to 40×60). The targets are RGBA32 because SDL 2.30's GLES2 renderer colour-swaps RGBA textures drawn into a BGRA (ARGB8888) target but not its YUV shader, which turned the movie R↔B. Mouse and touch coordinates are mapped back through the same rectangle.
+* Screen fill (`view.c`): scenes render into a 640×960 target that is shown centred. The bars get a blurred, darkened copy of the video (two linear downscales to 40×60); on phones (iOS, Android) they stay black during a song and the menu blur is dimmer. The targets are RGBA32 because SDL 2.30's GLES2 renderer colour-swaps RGBA textures drawn into a BGRA (ARGB8888) target but not its YUV shader, which turned the movie R↔B. Mouse and touch coordinates are mapped back through the same rectangle.
 * Touch areas fix: the `e_FlickBoardPictTbl` positions are the keys' top-left corners. The port had hit-tested them as centres, so every touch registered half a key below and to the right of the drawn key (reported on a phone as "the input lands lower than where I touch"). Keys and the interlude panel now use the drawn rectangles.
-* In-app IPA import (`ipa.c`, `mfx.c`): Android has no `make setup`, so on first start the app shows an import screen. The system file picker (`MikuFlickActivity.pickIpa`) returns a file descriptor; the importer checks the game version on the binary before extracting about 980 MB (with a free-space check), writes into `MikuFlick2.app.import/` and swaps it in, writing `gamedata.txt` last. Verified on Linux against `unzip` + `mfextract` (identical output); bad inputs (not a zip, a zip without an iOS app, a truncated IPA) are refused with a message and leave nothing behind.
+* In-app IPA import (`ipa.c`, `mfx.c`): Android has no `make setup`, so on first start the app shows an import screen. It is a native page of Android views over the game (`android.c`, `ImportPage.java`), like the UIKit screen on iOS; while it is up the game loop draws nothing, so the page animates at the display rate. The system file picker (`MikuFlickActivity.pickIpa`) returns a file descriptor; the importer checks the game version on the binary before extracting about 980 MB (with a free-space check), writes into `MikuFlick2.app.import/` and swaps it in, writing `gamedata.txt` last. Verified on Linux against `unzip` + `mfextract` (identical output); bad inputs (not a zip, a zip without an iOS app, a truncated IPA) are refused with a message and leave nothing behind.

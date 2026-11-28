@@ -42,6 +42,7 @@ static void mf_ipa_progress_cb(void *ud, double frac, const char *file);
 @property(nonatomic, strong) UILabel *keepOpenLabel;
 @property(nonatomic, strong) UIButton *actionButton;
 @property(nonatomic, strong) UIButton *laterButton;
+@property(nonatomic, strong) CAGradientLayer *glow;
 @end
 
 @implementation MFImportViewController
@@ -61,10 +62,24 @@ static void mf_ipa_progress_cb(void *ud, double frac, const char *file);
     return UIStatusBarStyleLightContent;
 }
 
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];   // no implicit animation on rotation or first layout
+    self.glow.frame = self.view.bounds;
+    [CATransaction commit];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     self.view.backgroundColor = [UIColor systemBackgroundColor];
+    // the faint teal glow from the top of the Android import screen (#0B2B2A to black by half height)
+    self.glow = [CAGradientLayer layer];
+    self.glow.colors = @[(id)[UIColor colorWithRed:0x0B / 255.0 green:0x2B / 255.0 blue:0x2A / 255.0 alpha:1.0].CGColor,
+                         (id)UIColor.blackColor.CGColor];
+    self.glow.locations = @[@0.0, @0.5];
+    [self.view.layer insertSublayer:self.glow atIndex:0];
 
     // Liquid Glass container so the card and action button share glass geometry.
     UIGlassContainerEffect *containerEffect = [[UIGlassContainerEffect alloc] init];
